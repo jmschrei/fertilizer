@@ -1,0 +1,40 @@
+[project]
+name = "fertilizer-genomics"
+version = "0.1.0"
+description = "Identify fertile ground in genomes for minimal-edit regulatory design."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Jacob Schreiber" }]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+dependencies = [
+    "numpy>=1.24",
+    "pyBigWig>=0.3.22",
+    "pandas>=2.0",
+    "joblib>=1.3",
+    "scipy>=1.10",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.5",
+]
+
+[project.scripts]
+fertilizer = "fertilizer.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/jmschrei/fertilizer"
+Issues = "https://github.com/jmschrei/fertilizer/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fertilizer"]
