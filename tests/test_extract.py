@@ -9,7 +9,7 @@ import pandas as pd
 import pyBigWig
 import pytest
 
-from fertilizer.cli import _build_parser
+from fertilizer.cli import build_parser
 from fertilizer.extract import (
     FertilizerWarning,
     _chunk_slices,
@@ -36,12 +36,14 @@ def _make_bw(path, header, entries=None):
     return path
 
 
-def _make_args(bigwigs, beds, out, n_jobs=1, stat=None):
+def _make_args(bigwigs, beds, out, n_jobs=1, stat=None, names=None):
     argv = ["extract", "-w", *map(str, bigwigs), "-b", *map(str, beds),
             "-o", str(out), "-j", str(n_jobs)]
     if stat is not None:
         argv += ["-s", stat]
-    return _build_parser().parse_args(argv)
+    if names is not None:
+        argv += ["-n", *names]
+    return build_parser().parse_args(argv)
 
 
 @pytest.fixture
@@ -149,7 +151,7 @@ class TestChunkSlices:
 
     def test_contiguous(self):
         slices = _chunk_slices(97, 5)
-        for a, b in zip(slices, slices[1:]):
+        for a, b in zip(slices, slices[1:], strict=False):
             assert a.stop == b.start
 
     def test_zero_length_input(self):
@@ -490,6 +492,53 @@ class TestRun:
         args = _make_args([dense_bw, dense_bw], [bed], out)
         with pytest.raises(ValueError, match="duplicate"):
             run(args)
+
+    def test_names_override_filename_stems(self, tmp_path, dense_bw, sparse_bw):
+        bed = tmp_path / "a.bed"
+        _write_bed(bed, [("chr1", 0, 500)])
+        out = tmp_path / "out.tsv"
+        args = _make_args([dense_bw, sparse_bw], [bed], out,
+                          names=["TrackA", "TrackB"])
+        run(args)
+        df = pd.read_csv(out, sep="\t")
+        assert list(df.columns) == ["chrom", "start", "end", "TrackA", "TrackB"]
+
+    def test_names_wrong_length_rejected(self, tmp_path, dense_bw, sparse_bw):
+        bed = tmp_path / "a.bed"
+        _write_bed(bed, [("chr1", 0, 500)])
+        out = tmp_path / "out.tsv"
+        args = _make_args([dense_bw, sparse_bw], [bed], out, names=["only_one"])
+        with pytest.raises(ValueError, match="--names"):
+            run(args)
+
+    def test_names_duplicate_rejected(self, tmp_path, dense_bw, sparse_bw):
+        bed = tmp_path / "a.bed"
+        _write_bed(bed, [("chr1", 0, 500)])
+        out = tmp_path / "out.tsv"
+        args = _make_args([dense_bw, sparse_bw], [bed], out,
+                          names=["same", "same"])
+        with pytest.raises(ValueError, match="duplicate"):
+            run(args)
+
+    def test_all_zero_output_warns(self, tmp_path, empty_bw):
+        bed = tmp_path / "a.bed"
+        _write_bed(bed, [("chr1", 0, 500), ("chr1", 500, 1000)])
+        out = tmp_path / "out.tsv"
+        args = _make_args([empty_bw], [bed], out)
+        with pytest.warns(FertilizerWarning, match="cells are exactly zero"):
+            run(args)
+
+    def test_duplicate_paths_with_names_succeed(self, tmp_path, dense_bw):
+        """Same bigWig used twice is legitimate when --names disambiguates."""
+        bed = tmp_path / "a.bed"
+        _write_bed(bed, [("chr1", 0, 500)])
+        out = tmp_path / "out.tsv"
+        args = _make_args([dense_bw, dense_bw], [bed], out,
+                          names=["TrackA", "TrackB"])
+        run(args)
+        df = pd.read_csv(out, sep="\t")
+        assert list(df.columns) == ["chrom", "start", "end", "TrackA", "TrackB"]
+        np.testing.assert_allclose(df["TrackA"].tolist(), df["TrackB"].tolist())
 
     def test_numeric_chrom_bigwig_matches_numeric_bed(self, tmp_path):
         """Regression: chrom "1" in BED must match chrom "1" in bigWig."""

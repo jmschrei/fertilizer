@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import threading
 import warnings
 from collections import Counter
 from pathlib import Path
@@ -12,6 +13,21 @@ import numpy as np
 import pandas as pd
 import pyBigWig
 from joblib import Parallel, delayed
+
+_thread_local_bw = threading.local()
+
+
+def _get_bw(path: str):
+    """Return a thread-local pyBigWig handle for `path`, opening once per worker."""
+    cache = getattr(_thread_local_bw, "cache", None)
+    if cache is None:
+        cache = {}
+        _thread_local_bw.cache = cache
+    handle = cache.get(path)
+    if handle is None:
+        handle = pyBigWig.open(path)
+        cache[path] = handle
+    return handle
 
 
 class FertilizerWarning(UserWarning):
@@ -78,31 +94,28 @@ def _means_for_slice(
     corresponding output value is left as 0.0. Uncovered but otherwise valid
     regions also yield 0.0 but are not reported.
     """
-    bw = pyBigWig.open(bigwig_path)
+    bw = _get_bw(bigwig_path)
     issues: set[str] = set()
-    try:
-        chrom_lengths = bw.chroms()
-        n = len(chroms)
-        means = np.zeros(n, dtype=np.float64)
-        for i in range(n):
-            chrom = chroms[i]
-            start = int(starts[i])
-            end = int(ends[i])
-            length = chrom_lengths.get(chrom)
-            if length is None:
-                issues.add("missing_chrom")
-                continue
-            if start < 0 or start >= end:
-                issues.add("invalid_region")
-                continue
-            if end > length:
-                issues.add("out_of_bounds")
-                continue
-            value = bw.stats(chrom, start, end, type=stat, nBins=1)[0]
-            if value is not None and not np.isnan(value):
-                means[i] = value
-    finally:
-        bw.close()
+    chrom_lengths = bw.chroms()
+    n = len(chroms)
+    means = np.zeros(n, dtype=np.float64)
+    for i in range(n):
+        chrom = chroms[i]
+        start = int(starts[i])
+        end = int(ends[i])
+        length = chrom_lengths.get(chrom)
+        if length is None:
+            issues.add("missing_chrom")
+            continue
+        if start < 0 or start >= end:
+            issues.add("invalid_region")
+            continue
+        if end > length:
+            issues.add("out_of_bounds")
+            continue
+        value = bw.stats(chrom, start, end, type=stat, nBins=1)[0]
+        if value is not None and not np.isnan(value):
+            means[i] = value
     return means, issues
 
 
@@ -155,6 +168,11 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPa
         help="Per-region summary statistic (default: mean).",
     )
     parser.add_argument(
+        "-n", "--names", nargs="+", default=None, metavar="NAME",
+        help="Override column names (one per --bigwigs entry). "
+             "Defaults to each bigWig's filename stem.",
+    )
+    parser.add_argument(
         "-j", "--n-jobs", type=int, default=-1,
         help="Number of parallel workers. -1 uses all cores (default).",
     )
@@ -166,12 +184,20 @@ def run(args: argparse.Namespace) -> int:
     if args.n_jobs != -1 and args.n_jobs < 1:
         raise ValueError(f"n_jobs must be -1 or >= 1, got {args.n_jobs}")
 
-    stems = [Path(bw).stem for bw in args.bigwigs]
+    if args.names is not None:
+        if len(args.names) != len(args.bigwigs):
+            raise ValueError(
+                f"--names has {len(args.names)} entries but --bigwigs has "
+                f"{len(args.bigwigs)}; they must match"
+            )
+        stems = list(args.names)
+    else:
+        stems = [Path(bw).stem for bw in args.bigwigs]
     dupes = [stem for stem, count in Counter(stems).items() if count > 1]
     if dupes:
+        source = "--names" if args.names is not None else "bigWig filename stems"
         raise ValueError(
-            f"duplicate bigWig filename stems would produce colliding columns: "
-            f"{sorted(dupes)}"
+            f"duplicate column names from {source} would collide: {sorted(dupes)}"
         )
 
     regions = load_regions(args.beds)
@@ -201,18 +227,29 @@ def run(args: argparse.Namespace) -> int:
 
     per_bw_means = [np.zeros(n, dtype=np.float64) for _ in args.bigwigs]
     per_bw_issues: list[set[str]] = [set() for _ in args.bigwigs]
-    for (bw_idx, sl, _), (means, issues) in zip(tasks, results):
+    for (bw_idx, sl, _), (means, issues) in zip(tasks, results, strict=True):
         per_bw_means[bw_idx][sl] = means
         per_bw_issues[bw_idx] |= issues
 
     out = regions.copy()
     all_issues: set[str] = set()
-    for stem, sorted_means, issues in zip(stems, per_bw_means, per_bw_issues):
+    for stem, sorted_means, issues in zip(stems, per_bw_means, per_bw_issues, strict=True):
         out[stem] = sorted_means[inverse_order]
         all_issues |= issues
 
     for key in sorted(all_issues):
         warnings.warn(_WARNING_MESSAGES[key], FertilizerWarning, stacklevel=2)
+
+    if n > 0:
+        signal_block = out[stems].to_numpy()
+        zero_frac = float((signal_block == 0).mean())
+        if zero_frac > 0.95:
+            warnings.warn(
+                f"{zero_frac:.1%} of region-by-bigWig cells are exactly zero; "
+                "this often means a wrong bigWig path, a chromosome-naming "
+                "mismatch (chr1 vs 1), or BED regions outside the assembly.",
+                FertilizerWarning, stacklevel=2,
+            )
 
     out.to_csv(args.output, sep="\t", index=False)
     return 0
