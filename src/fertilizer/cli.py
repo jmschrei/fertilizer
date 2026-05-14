@@ -8,8 +8,8 @@ import sys
 from . import __version__
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    from . import diff, extract
+def build_parser() -> argparse.ArgumentParser:
+    from . import enrichment, extract
 
     parser = argparse.ArgumentParser(
         prog="fertilizer",
@@ -19,13 +19,13 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     extract.add_subparser(subparsers)
-    diff.add_subparser(subparsers)
+    enrichment.add_subparser(subparsers)
 
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+    args = build_parser().parse_args(argv)
     return args.func(args)
 
 
