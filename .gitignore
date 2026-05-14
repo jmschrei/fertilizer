@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.env
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+.DS_Store
+uv.lock
+
+# Generated demo data — see examples/make_demo_data.py
+examples/*.bw
+examples/regions.bed
+examples/signals.tsv
+examples/enrichment.tsv
