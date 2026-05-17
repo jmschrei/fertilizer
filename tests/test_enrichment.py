@@ -135,10 +135,9 @@ class TestEnrichmentAnalysis:
             enrichment_analysis(counts, pseudocount=-0.1)
 
     def test_k_equals_two_runs_without_warning(self):
-        """K=2 used to be a degenerate regime for the K-1 df χ² LRT (the old
-        warning). The 1-df top-two LRT is well-defined at K=2 — the two
-        conditions are literally the top pair — so no warning is emitted
-        any more."""
+        """K=2 is well-defined: the (k*, k_bg) pair is just the two
+        conditions, and the default background_rank of 3 is silently capped
+        to K=2. No quality warning should fire."""
         rng = np.random.default_rng(21)
         counts = rng.poisson(80, size=(200, 2)).astype(float)
         with warnings.catch_warnings():
@@ -146,6 +145,7 @@ class TestEnrichmentAnalysis:
             res = enrichment_analysis(counts)
         assert res.p_value.shape == (200,)
         assert res.effect_size.shape == (200,)
+        assert res.background_rank == 2
 
     def test_effect_size_is_log2_enriched_over_rest(self):
         """Per spec, effect_size = log2((X_{k*}/s_{k*}) + pc) - log2(mean_rest + pc).
@@ -211,12 +211,12 @@ class TestEnrichmentAnalysis:
 
     def test_does_not_call_depletion_only_loci(self):
         """A locus where exactly one condition is *depleted* relative to the
-        others must NOT be called. The top-two LRT compares k* against k_2;
-        under depletion, both top values sit at the high level and look
-        approximately equal under the test, so LRT ~ 0 and the locus is
-        not called. Contrast with the same magnitude of *enrichment* in
-        one condition, where k* sharply exceeds k_2 and the locus IS
-        detected."""
+        others must NOT be called. The (k*, k_bg) LRT compares the top
+        condition against the rank-`background_rank` condition; under
+        depletion, both of those sit at the high level and look approximately
+        equal under the test, so LRT ~ 0 and the locus is not called.
+        Contrast with the same magnitude of *enrichment* in one condition,
+        where k* sharply exceeds k_bg and the locus IS detected."""
         rng = np.random.default_rng(42)
         n, K = 2000, 4
         mu_base = 200.0
@@ -245,6 +245,147 @@ class TestEnrichmentAnalysis:
         if called.sum() > 0:
             fdr = (called & ~enriched).sum() / called.sum()
             assert fdr < 0.1
+
+    def test_background_rank_default_is_three(self):
+        """Documented default is rank 3 (one competing peak tolerated)."""
+        rng = np.random.default_rng(901)
+        counts = rng.poisson(100, size=(100, 5)).astype(float)
+        res = enrichment_analysis(counts)
+        assert res.background_rank == 3
+
+    def test_background_rank_2_uses_second_highest_condition(self):
+        """At background_rank=2, the LRT compares k* against the
+        second-highest condition. On data with a competing peak (where the
+        second-highest is elevated), rank=2 gives larger p-values than
+        rank=3 (which compares against a baseline condition instead)."""
+        rng = np.random.default_rng(902)
+        counts = rng.poisson(80, size=(300, 4)).astype(float)
+        res = enrichment_analysis(counts, background_rank=2,
+                                  dispersion_override=0.05)
+        assert res.background_rank == 2
+
+        rng2 = np.random.default_rng(903)
+        counts2 = rng2.poisson(80, size=(300, 4)).astype(float)
+        # Inject one competing peak in condition 1 for the first 50 loci.
+        counts2[:50, 1] = rng2.poisson(160, size=50).astype(float)
+        # And a real enrichment in condition 0 for those same loci.
+        counts2[:50, 0] = rng2.poisson(320, size=50).astype(float)
+
+        res2 = enrichment_analysis(counts2, background_rank=2,
+                                   dispersion_override=0.05)
+        res3 = enrichment_analysis(counts2, background_rank=3,
+                                   dispersion_override=0.05)
+        # rank-3 (which skips the competing peak) gives SMALLER p-values
+        # for the loci with a competing peak than rank-2 does.
+        assert (res3.p_value[:50] < res2.p_value[:50]).mean() > 0.7
+
+    def test_background_rank_robust_to_competing_peak(self):
+        """Default (rank 3) should detect enrichment in the presence of a
+        single competing peak that defeats rank 2. Setup respects the
+        null-majority assumption: 2000 loci on a 5-condition Poisson
+        background, with 5% truly enriched in cond 0 AND simultaneously
+        elevated about as much in cond 1 (the 'competing peak'). The other
+        K-2 conditions sit at baseline."""
+        rng = np.random.default_rng(904)
+        n, K = 2000, 5
+        base_mu = 100
+        counts = np.column_stack([
+            rng.poisson(base_mu, size=n) for _ in range(K)
+        ]).astype(float)
+        n_signal = n // 20  # 5% — preserves null-majority for size factors
+        signal = slice(0, n_signal)
+        counts[signal, 0] = rng.poisson(base_mu * 4.0, size=n_signal).astype(float)
+        counts[signal, 1] = rng.poisson(base_mu * 3.5, size=n_signal).astype(float)
+
+        res2 = enrichment_analysis(counts, background_rank=2, fit_type="zero")
+        res3 = enrichment_analysis(counts, background_rank=3, fit_type="zero")
+        # Rank 2 sees the competing peak as the background → small LRT
+        # statistic → few calls. Rank 3 sees a baseline condition → many.
+        calls2 = (res2.q_value[signal] < 0.05).sum()
+        calls3 = (res3.q_value[signal] < 0.05).sum()
+        assert calls3 > calls2, f"rank-3 calls={calls3}, rank-2 calls={calls2}"
+        # Among rank-3 calls on the signal loci, almost all point to cond 0.
+        called3 = res3.q_value[signal] < 0.05
+        assert (res3.enriched_condition_idx[signal][called3] == 0).mean() > 0.9
+
+    def test_background_rank_caps_to_K(self):
+        """Requesting a rank larger than K silently caps to K so the default
+        of 3 just works at K=2."""
+        rng = np.random.default_rng(905)
+        counts = rng.poisson(100, size=(100, 3)).astype(float)
+        res = enrichment_analysis(counts, background_rank=99)
+        assert res.background_rank == 3
+        # And the default at K=2:
+        counts2 = rng.poisson(100, size=(100, 2)).astype(float)
+        res2 = enrichment_analysis(counts2)
+        assert res2.background_rank == 2
+
+    def test_conditions_below_kbg_are_nuisance_and_dont_affect_lrt(self):
+        """Locks in the nuisance-cancellation property: at K=5 with
+        background_rank=3, the LRT is computed only from (k*, k_bg) = (rank
+        1, rank 3). Varying the values of the rank-4 and rank-5 conditions
+        (while keeping them below k_bg in the ordering) must NOT change
+        lrt_stat or p_value. The effect_size IS allowed to change — it is
+        a separate user-facing summary that averages the K-1 non-k* values.
+
+        Setup forces a deterministic ranking of the top 3:
+          - cond 0: poisson(400) → rank 1 (k*)
+          - cond 1: poisson(200) → rank 2
+          - cond 2: poisson(100) → rank 3 (k_bg)
+          - cond 3, 4: small constants < 70 → always ranks 4, 5
+        The means are far enough apart that the top-3 ordering is fixed
+        across all loci with overwhelming probability. Size factors and
+        dispersion are pinned via overrides so they don't introduce
+        indirect dependencies."""
+        rng = np.random.default_rng(910)
+        n, K = 200, 5
+        counts_a = np.zeros((n, K), dtype=np.float64)
+        counts_a[:, 0] = rng.poisson(400, size=n)
+        counts_a[:, 1] = rng.poisson(200, size=n)
+        counts_a[:, 2] = rng.poisson(100, size=n)
+        counts_a[:, 3] = 10.0
+        counts_a[:, 4] = 5.0
+
+        # Build a second input that agrees on conds 0/1/2 but uses
+        # different (still small) values for the nuisance conds 3 and 4.
+        counts_b = counts_a.copy()
+        counts_b[:, 3] = 30.0
+        counts_b[:, 4] = 20.0
+
+        # Sanity: top-3 ordering is identical across the two inputs and
+        # constant across loci (cond 0 > cond 1 > cond 2 by mean).
+        order_a = np.argsort(counts_a, axis=1)
+        order_b = np.argsort(counts_b, axis=1)
+        np.testing.assert_array_equal(order_a[:, -3:], order_b[:, -3:])
+        # The top-3 sort positions hold (0, 1, 2) at every locus.
+        np.testing.assert_array_equal(order_a[:, -3:],
+                                      np.tile([2, 1, 0], (n, 1)))
+
+        sf = np.ones(K)
+        res_a = enrichment_analysis(counts_a, background_rank=3,
+                                    dispersion_override=0.05,
+                                    size_factors_override=sf)
+        res_b = enrichment_analysis(counts_b, background_rank=3,
+                                    dispersion_override=0.05,
+                                    size_factors_override=sf)
+        # Test statistic and p-value must be identical to numerical precision.
+        np.testing.assert_allclose(res_a.lrt_stat, res_b.lrt_stat, atol=1e-12)
+        np.testing.assert_allclose(res_a.p_value, res_b.p_value, atol=1e-12)
+        np.testing.assert_array_equal(res_a.enriched_condition_idx,
+                                       res_b.enriched_condition_idx)
+        # Effect size DOES depend on the changed conditions (it averages
+        # the K-1 non-k* values), so it must differ on every locus.
+        assert not np.allclose(res_a.effect_size, res_b.effect_size)
+
+    def test_background_rank_rejects_below_2(self):
+        rng = np.random.default_rng(906)
+        counts = rng.poisson(50, size=(50, 4)).astype(float)
+        with pytest.raises(ValueError, match="background_rank"):
+            enrichment_analysis(counts, background_rank=1)
+        with pytest.raises(ValueError, match="background_rank"):
+            enrichment_analysis(counts, background_rank=0)
+        with pytest.raises(ValueError, match="background_rank"):
+            enrichment_analysis(counts, background_rank=1.5)  # type: ignore[arg-type]
 
     def test_p_value_bonferroni_corrected_by_K(self):
         """The per-locus p-value reported is exactly
@@ -372,9 +513,15 @@ class TestEnrichmentAnalysis:
 
 class TestCalibration:
     """Null-distribution calibration. These simulations assert that Type-I
-    error at nominal alpha=0.05 does not exceed ~1.6x nominal across the
-    parameter grid we actually care about. Bounds are loose because n_loci
-    is only a few thousand and simulation noise is real."""
+    error at nominal alpha=0.05 stays within sane bounds across the parameter
+    grid we care about. Bounds are loose because n_loci is only a few thousand
+    and simulation noise is real.
+
+    At `background_rank=2`, the test is uniformly conservative across K.
+    At `background_rank=3` (default), the test is approximately nominal at
+    K=3 — where rank-3 = the lowest condition out of three and the
+    order-statistic gap is at its widest — and increasingly conservative
+    for K>=4 as Bonferroni × K dominates."""
 
     @pytest.mark.parametrize("K,mu_val", [
         (3, 30),
@@ -383,7 +530,29 @@ class TestCalibration:
         (5, 100),
         (8, 100),
     ])
-    def test_type_one_under_poisson_null(self, K, mu_val):
+    def test_rank_2_poisson_null_is_conservative(self, K, mu_val):
+        """At background_rank=2 the test is tightly conservative across K."""
+        rng = np.random.default_rng(10 + K * 97 + mu_val)
+        n = 4000
+        counts = rng.poisson(mu_val, size=(n, K)).astype(float)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FertilizerEnrichmentWarning)
+            res = enrichment_analysis(counts, fit_type="parametric",
+                                      background_rank=2)
+        t1 = (res.p_value < 0.05).mean()
+        assert t1 < 0.08, f"K={K}, mu={mu_val}: T1@0.05 = {t1:.4f}"
+
+    @pytest.mark.parametrize("K,mu_val", [
+        (3, 30),
+        (3, 100),
+        (3, 500),
+        (5, 100),
+        (8, 100),
+    ])
+    def test_default_rank_poisson_null_within_bounds(self, K, mu_val):
+        """background_rank=3 (default): approximately nominal at K=3
+        (rank-3 = lowest of three; order-statistic gap is widest here),
+        conservative for K>=4."""
         rng = np.random.default_rng(10 + K * 97 + mu_val)
         n = 4000
         counts = rng.poisson(mu_val, size=(n, K)).astype(float)
@@ -391,7 +560,10 @@ class TestCalibration:
             warnings.simplefilter("ignore", FertilizerEnrichmentWarning)
             res = enrichment_analysis(counts, fit_type="parametric")
         t1 = (res.p_value < 0.05).mean()
-        assert t1 < 0.08, f"K={K}, mu={mu_val}: T1@0.05 = {t1:.4f}"
+        # At K=3, rank=3 compares max vs min of 3 → mildly anti-conservative.
+        # At K>=4 the Bonferroni × K dominates and the test is sub-nominal.
+        bound = 0.10 if K == 3 else 0.05
+        assert t1 < bound, f"K={K}, mu={mu_val}: T1@0.05 = {t1:.4f}"
 
     @pytest.mark.parametrize("K,mu_val,alpha_true", [
         (3, 100, 0.05),
@@ -401,9 +573,10 @@ class TestCalibration:
         (8, 100, 0.05),
         (8, 100, 0.10),
     ])
-    def test_type_one_under_nb_null_with_trend(self, K, mu_val, alpha_true):
+    def test_rank_2_nb_null_with_trend(self, K, mu_val, alpha_true):
         """Under NB with moderate overdispersion, the parametric trend
-        should recover alpha well enough to keep T1 near nominal."""
+        should estimate alpha well enough to keep T1 near nominal at
+        background_rank=2."""
         rng = np.random.default_rng(100 + K * 53 + int(alpha_true * 1000))
         n = 5000
         r = 1.0 / alpha_true
@@ -411,7 +584,8 @@ class TestCalibration:
         counts = rng.negative_binomial(r, p, size=(n, K)).astype(float)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", FertilizerEnrichmentWarning)
-            res = enrichment_analysis(counts, fit_type="parametric")
+            res = enrichment_analysis(counts, fit_type="parametric",
+                                      background_rank=2)
         t1 = (res.p_value < 0.05).mean()
         assert t1 < 0.09, (
             f"K={K}, mu={mu_val}, alpha={alpha_true}: T1@0.05 = {t1:.4f}"
@@ -485,6 +659,23 @@ class TestCalibration:
         assert res.n_loci_for_size_factors <= 450
         assert res.n_loci_for_size_factors > 400
 
+    def test_lrt_zero_dominated_flag(self):
+        """Loci where the LRT pair (X_top, X_bg) contains a zero are flagged.
+        These produce very small p-values driven by the 1e-20 mu_alt clamp
+        rather than by data and should be visible to users."""
+        counts = np.array([
+            [10.0, 10.0, 10.0, 10.0],
+            [20.0, 20.0, 20.0, 20.0],
+            [50.0, 50.0, 50.0, 50.0],
+            [100.0, 100.0, 100.0, 100.0],
+            [0.0, 20.0, 40.0, 80.0],   # X_bg (rank-3, normalized=20) > 0; X_top=80 > 0 -> NOT flagged
+            [0.0, 0.0, 0.0, 80.0],     # X_bg (rank-3) == 0 -> flagged
+        ])
+        res = enrichment_analysis(counts, dispersion_override=0.05)
+        assert res.lrt_zero_dominated.shape == (6,)
+        assert not res.lrt_zero_dominated[:5].any()
+        assert res.lrt_zero_dominated[5]
+
     def test_pc_dominated_flag_fires_when_expected(self):
         counts = np.array([
             [10.0, 10.0, 10.0],
@@ -534,6 +725,8 @@ class TestEnrichmentCLI:
         assert list(df.columns) == [
             "chrom", "start", "end", "A", "B", "C",
             "effect_size", "p_value", "q_value", "enriched_condition",
+            "effect_size_pc_dominated", "lrt_zero_dominated",
+            "lrt_convergence_failed",
         ]
         assert (df["enriched_condition"] == "C").mean() > 0.5
         assert df["q_value"].le(0.05).all()
@@ -605,7 +798,7 @@ class TestEnrichmentCLI:
         assert df["chrom"].tolist() == ["chr3", "chr1", "chr2", "chr1", "chr3", "chr2"]
         assert df["start"].tolist() == [500, 0, 100, 200, 300, 400]
 
-    def test_missing_column_raises(self, tmp_path):
+    def test_missing_column_errors(self, tmp_path, capsys):
         inp = tmp_path / "in.tsv"
         out = tmp_path / "out.tsv"
         self._write_input(
@@ -613,10 +806,10 @@ class TestEnrichmentCLI:
             chrom=["chr1", "chr1"], start=[0, 100], end=[50, 150],
             A=[10.0, 20.0], B=[12.0, 18.0],
         )
-        with pytest.raises(ValueError, match="columns not found"):
-            main(self._enrich_argv(inp, ["A", "nope"], out))
+        assert main(self._enrich_argv(inp, ["A", "nope"], out)) == 2
+        assert "columns not found" in capsys.readouterr().err
 
-    def test_single_condition_rejected(self, tmp_path):
+    def test_single_condition_rejected(self, tmp_path, capsys):
         inp = tmp_path / "in.tsv"
         out = tmp_path / "out.tsv"
         self._write_input(
@@ -624,8 +817,8 @@ class TestEnrichmentCLI:
             chrom=["chr1"], start=[0], end=[100],
             A=[10.0],
         )
-        with pytest.raises(ValueError, match="at least 2 conditions"):
-            main(self._enrich_argv(inp, ["A"], out))
+        assert main(self._enrich_argv(inp, ["A"], out)) == 2
+        assert "at least 2 conditions" in capsys.readouterr().err
 
     def test_size_factors_flag(self, tmp_path):
         rng = np.random.default_rng(99)
@@ -655,11 +848,55 @@ class TestEnrichmentCLI:
             chrom=["chr1", "chr1"], start=[0, 100], end=[50, 150],
             A=[10.0, 20.0], B=[12.0, 18.0], C=[11.0, 19.0],
         )
-        with pytest.raises(ValueError, match="size-factors"):
-            main(self._enrich_argv(
-                inp, list("ABC"), out,
-                ["--size-factors", "1.0", "1.0"],
-            ))
+        assert main(self._enrich_argv(
+            inp, list("ABC"), out,
+            ["--size-factors", "1.0", "1.0"],
+        )) == 2
+
+    def test_background_rank_flag(self, tmp_path):
+        """`--background-rank 2` compares k* against the second-highest
+        condition; the default (rank 3) compares against the third-highest
+        and gives smaller p-values when there is a competing peak."""
+        rng = np.random.default_rng(404)
+        n = 300
+        cols = {c: rng.poisson(80, size=n).astype(float) for c in "ABCDE"}
+        # Inject enrichment in A with B as a competing peak for the first 60.
+        cols["A"][:60] = rng.poisson(320, size=60)
+        cols["B"][:60] = rng.poisson(280, size=60)
+        inp = tmp_path / "in.tsv"
+        self._write_input(
+            inp,
+            chrom=["chr1"] * n,
+            start=np.arange(n),
+            end=np.arange(n) + 1,
+            **cols,
+        )
+        out_default = tmp_path / "default.tsv"
+        out_rank2 = tmp_path / "rank2.tsv"
+        assert main(self._enrich_argv(
+            inp, list("ABCDE"), out_default, ["--q-threshold", "1.0"],
+        )) == 0
+        assert main(self._enrich_argv(
+            inp, list("ABCDE"), out_rank2,
+            ["--q-threshold", "1.0", "--background-rank", "2"],
+        )) == 0
+        df_def = pd.read_csv(out_default, sep="\t")
+        df_r2 = pd.read_csv(out_rank2, sep="\t")
+        # Default (rank 3) should yield smaller p-values than rank 2 on the
+        # injected loci (where the competing peak defeats rank 2).
+        assert (df_def["p_value"].iloc[:60] < df_r2["p_value"].iloc[:60]).mean() > 0.7
+
+    def test_background_rank_flag_invalid_rejected(self, tmp_path):
+        inp = tmp_path / "in.tsv"
+        out = tmp_path / "out.tsv"
+        self._write_input(
+            inp,
+            chrom=["chr1"], start=[0], end=[100],
+            A=[10.0], B=[12.0], C=[11.0],
+        )
+        assert main(self._enrich_argv(
+            inp, list("ABC"), out, ["--background-rank", "1"],
+        )) == 2
 
     def test_dispersion_override_flag(self, tmp_path):
         rng = np.random.default_rng(12)
@@ -681,6 +918,83 @@ class TestEnrichmentCLI:
         # All rows present (loose threshold)
         df = pd.read_csv(out, sep="\t")
         assert len(df) == n
+
+
+class TestExtractStatGuard:
+    """`enrich` should refuse inputs produced by `extract --stat <non-sum>`
+    unless the user passes `--allow-non-sum`. Inputs with no metadata header
+    (e.g. user-supplied TSVs) are accepted without comment."""
+
+    def _write_with_header(self, path, stat, **cols):
+        df = pd.DataFrame(cols)
+        with open(path, "w") as fh:
+            fh.write(f"# fertilizer-extract stat={stat}\n")
+            df.to_csv(fh, sep="\t", index=False)
+
+    def test_refuses_mean_input(self, tmp_path, capsys):
+        inp = tmp_path / "in.tsv"
+        out = tmp_path / "out.tsv"
+        self._write_with_header(
+            inp, "mean",
+            chrom=["chr1", "chr1"], start=[0, 100], end=[50, 150],
+            A=[10.0, 20.0], B=[12.0, 18.0],
+        )
+        assert main(["enrich", "-i", str(inp), "-c", "A", "B", "-o", str(out)]) == 2
+        assert "--stat mean" in capsys.readouterr().err
+
+    def test_allow_non_sum_bypasses(self, tmp_path):
+        rng = np.random.default_rng(2024)
+        inp = tmp_path / "in.tsv"
+        out = tmp_path / "out.tsv"
+        n = 200
+        self._write_with_header(
+            inp, "mean",
+            chrom=["chr1"] * n,
+            start=np.arange(n),
+            end=np.arange(n) + 1,
+            A=rng.poisson(50, size=n).astype(float),
+            B=rng.poisson(50, size=n).astype(float),
+        )
+        assert main([
+            "enrich", "-i", str(inp), "-c", "A", "B",
+            "-o", str(out), "--q-threshold", "1.0", "--allow-non-sum",
+        ]) == 0
+
+    def test_sum_header_runs_without_flag(self, tmp_path):
+        rng = np.random.default_rng(2025)
+        inp = tmp_path / "in.tsv"
+        out = tmp_path / "out.tsv"
+        n = 200
+        self._write_with_header(
+            inp, "sum",
+            chrom=["chr1"] * n,
+            start=np.arange(n),
+            end=np.arange(n) + 1,
+            A=rng.poisson(50, size=n).astype(float),
+            B=rng.poisson(50, size=n).astype(float),
+        )
+        assert main([
+            "enrich", "-i", str(inp), "-c", "A", "B",
+            "-o", str(out), "--q-threshold", "1.0",
+        ]) == 0
+
+    def test_no_header_is_accepted(self, tmp_path):
+        """User-supplied TSVs without a fertilizer-extract header pass through."""
+        rng = np.random.default_rng(2026)
+        inp = tmp_path / "in.tsv"
+        out = tmp_path / "out.tsv"
+        n = 200
+        pd.DataFrame({
+            "chrom": ["chr1"] * n,
+            "start": np.arange(n),
+            "end": np.arange(n) + 1,
+            "A": rng.poisson(50, size=n).astype(float),
+            "B": rng.poisson(50, size=n).astype(float),
+        }).to_csv(inp, sep="\t", index=False)
+        assert main([
+            "enrich", "-i", str(inp), "-c", "A", "B",
+            "-o", str(out), "--q-threshold", "1.0",
+        ]) == 0
 
 
 def test_parser_has_both_subcommands():

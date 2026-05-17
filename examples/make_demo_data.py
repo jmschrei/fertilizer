@@ -27,7 +27,8 @@ SEED = 0
 def make_regions(rng: np.random.Generator) -> list[tuple[str, int, int]]:
     # Evenly spaced, non-overlapping windows with a small deterministic gap.
     spacing = CHROM_LEN // N_REGIONS
-    assert spacing > REGION_LEN, "regions would overlap; raise CHROM_LEN"
+    if spacing <= REGION_LEN:
+        raise ValueError("regions would overlap; raise CHROM_LEN")
     starts = np.arange(N_REGIONS) * spacing
     # tiny jitter that keeps non-overlap
     max_jitter = (spacing - REGION_LEN) // 2

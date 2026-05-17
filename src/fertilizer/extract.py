@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import threading
 import warnings
 from collections import Counter
@@ -13,6 +14,21 @@ import numpy as np
 import pandas as pd
 import pyBigWig
 from joblib import Parallel, delayed
+
+
+def _open_text_write(path: str):
+    """Open `path` for text writing, transparently using gzip if path ends .gz."""
+    if str(path).endswith(".gz"):
+        return gzip.open(path, "wt")
+    return open(path, "w")
+
+__all__ = [
+    "FertilizerWarning",
+    "STAT_CHOICES",
+    "bigwig_region_means",
+    "load_regions",
+    "run_extract",
+]
 
 _thread_local_bw = threading.local()
 
@@ -25,7 +41,10 @@ def _get_bw(path: str):
         _thread_local_bw.cache = cache
     handle = cache.get(path)
     if handle is None:
-        handle = pyBigWig.open(path)
+        try:
+            handle = pyBigWig.open(path)
+        except RuntimeError as e:
+            raise ValueError(f"could not open bigWig {path!r}: {e}") from e
         cache[path] = handle
     return handle
 
@@ -34,20 +53,34 @@ class FertilizerWarning(UserWarning):
     """Warning category for locus-level problems encountered during aggregation."""
 
 
-_WARNING_MESSAGES = {
-    "missing_chrom": (
-        "some regions reference a chromosome not present in a bigWig; "
-        "those values were filled with 0.0"
-    ),
-    "out_of_bounds": (
-        "some regions extend beyond the chromosome length of a bigWig; "
-        "those values were filled with 0.0"
-    ),
-    "invalid_region": (
-        "some regions have non-positive length or a negative start; "
-        "those values were filled with 0.0"
-    ),
-}
+def _format_issue_warning(
+    key: str, bigwig_path: str, example_chrom: str, bigwig_chroms: list[str]
+) -> str:
+    """Compose a biologist-friendly warning for a per-bigWig issue."""
+    if key == "missing_chrom":
+        sample = ", ".join(sorted(bigwig_chroms)[:5])
+        ellipsis = ", ..." if len(bigwig_chroms) > 5 else ""
+        return (
+            f"chromosome {example_chrom!r} (and possibly others) referenced "
+            f"in BED but missing from bigWig {bigwig_path!r}; those values "
+            f"were filled with 0.0. Bigwig has chroms: [{sample}{ellipsis}]. "
+            "Common cause: mixing 'chr1'-style and '1'-style names "
+            "(hg19/hg38 vs Ensembl)."
+        )
+    if key == "out_of_bounds":
+        return (
+            f"some regions extend beyond the chromosome length of bigWig "
+            f"{bigwig_path!r} (first encountered on chrom {example_chrom!r}); "
+            "those values were filled with 0.0. Common cause: mixing "
+            "assemblies (e.g. hg19 BED against hg38 bigWig)."
+        )
+    if key == "invalid_region":
+        return (
+            f"some regions have non-positive length or a negative start "
+            f"(first encountered on chrom {example_chrom!r}); those values "
+            f"were filled with 0.0 (bigWig {bigwig_path!r})."
+        )
+    return f"unknown locus-level issue {key!r} in bigWig {bigwig_path!r}"
 
 STAT_CHOICES = ("mean", "max", "min", "sum", "std", "coverage")
 
@@ -60,24 +93,53 @@ def _empty_regions() -> pd.DataFrame:
     })
 
 
+# Standard BED column names through BED6 — the only positions whose meaning
+# is unambiguous across BED variants. BED12 columns 7-12 and narrowPeak
+# columns 7-10 disagree on what each position means, so past column 6 we
+# fall back to generic `bed_col_<i>` rather than guess. Users who need
+# narrowPeak's signalValue / pValue / qValue / peak names can rename
+# downstream — the data is preserved either way.
+_BED_COL_NAMES = ("chrom", "start", "end", "name", "score", "strand")
+
+
 def load_regions(bed_paths: list[str]) -> pd.DataFrame:
-    """Load one or more BED files and return chrom/start/end as a single frame.
+    """Load one or more BED files and return a single frame.
+
+    The first three columns (chrom/start/end) are required. Additional
+    columns are passed through with conventional BED/narrowPeak names
+    (`name`, `score`, `strand`, ...) when present, so a peak `name`
+    column survives the pipeline and can be used to join back to
+    upstream annotations.
 
     Chromosome names are forced to string dtype so numeric-named chroms
     (e.g. "1", "2") survive round-trips against bigWig keys. `#`-prefixed
     comment lines are skipped. Empty BED files contribute zero rows.
+
+    All input BED files are expected to have the same number of columns;
+    extra columns in some files but not others will produce NaN in the
+    concatenated frame.
     """
     frames: list[pd.DataFrame] = []
     for path in bed_paths:
         try:
-            frames.append(pd.read_csv(
+            frame = pd.read_csv(
                 path, sep="\t", header=None, comment="#",
-                usecols=[0, 1, 2],
-                names=["chrom", "start", "end"],
-                dtype={"chrom": str, "start": np.int64, "end": np.int64},
-            ))
+                dtype={0: str, 1: np.int64, 2: np.int64},
+            )
         except pd.errors.EmptyDataError:
             continue
+        if frame.shape[1] < 3:
+            raise ValueError(
+                f"BED file {path!r} has only {frame.shape[1]} column(s); "
+                "at least 3 (chrom, start, end) are required"
+            )
+        n_cols = frame.shape[1]
+        named = [
+            _BED_COL_NAMES[i] if i < len(_BED_COL_NAMES) else f"bed_col_{i}"
+            for i in range(n_cols)
+        ]
+        frame.columns = named
+        frames.append(frame)
     return pd.concat(frames, ignore_index=True) if frames else _empty_regions()
 
 
@@ -87,15 +149,16 @@ def _means_for_slice(
     starts: np.ndarray,
     ends: np.ndarray,
     stat: str = "mean",
-) -> tuple[np.ndarray, set[str]]:
+) -> tuple[np.ndarray, dict[str, str]]:
     """Compute per-region summary statistic for pre-extracted coordinate arrays.
 
-    Locus-level problems are reported via the returned issue-key set and the
+    Locus-level problems are reported via the returned dict (issue key -> the
+    first chromosome on which the issue was observed in this slice) and the
     corresponding output value is left as 0.0. Uncovered but otherwise valid
     regions also yield 0.0 but are not reported.
     """
     bw = _get_bw(bigwig_path)
-    issues: set[str] = set()
+    issues: dict[str, str] = {}
     chrom_lengths = bw.chroms()
     n = len(chroms)
     means = np.zeros(n, dtype=np.float64)
@@ -105,13 +168,13 @@ def _means_for_slice(
         end = int(ends[i])
         length = chrom_lengths.get(chrom)
         if length is None:
-            issues.add("missing_chrom")
+            issues.setdefault("missing_chrom", chrom)
             continue
         if start < 0 or start >= end:
-            issues.add("invalid_region")
+            issues.setdefault("invalid_region", chrom)
             continue
         if end > length:
-            issues.add("out_of_bounds")
+            issues.setdefault("out_of_bounds", chrom)
             continue
         value = bw.stats(chrom, start, end, type=stat, nBins=1)[0]
         if value is not None and not np.isnan(value):
@@ -130,10 +193,15 @@ def bigwig_region_means(
     simply have no coverage in the bigWig also yield 0.0 but are *not* reported,
     since missing coverage is a property of the data, not of the loci.
     """
+    if stat not in STAT_CHOICES:
+        raise ValueError(
+            f"unknown stat {stat!r}; must be one of {STAT_CHOICES}"
+        )
     chroms = regions["chrom"].to_numpy()
     starts = regions["start"].to_numpy(dtype=np.int64)
     ends = regions["end"].to_numpy(dtype=np.int64)
-    return _means_for_slice(bigwig_path, chroms, starts, ends, stat=stat)
+    means, issues = _means_for_slice(bigwig_path, chroms, starts, ends, stat=stat)
+    return means, set(issues.keys())
 
 
 def _chunk_slices(n: int, n_chunks: int) -> list[slice]:
@@ -145,11 +213,23 @@ def _chunk_slices(n: int, n_chunks: int) -> list[slice]:
     return [slice(int(bounds[i]), int(bounds[i + 1])) for i in range(n_chunks)]
 
 
+_EXTRACT_EPILOG = """\
+Example:
+  fertilizer extract -w A.bw B.bw C.bw -b peaks.bed -o signals.tsv -s sum
+
+Use --stat sum if the output will be passed to `fertilizer enrich` — the
+NB-GLM there assumes count-like input. See the README for full docs:
+https://github.com/jmschrei/fertilizer#fertilizer-extract--signal-aggregation
+"""
+
+
 def add_subparser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     """Register the `fertilizer extract` subcommand."""
     parser = subparsers.add_parser(
         "extract",
         help="Extract a summary statistic from bigWigs over BED regions.",
+        epilog=_EXTRACT_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "-w", "--bigwigs", nargs="+", required=True, metavar="BIGWIG",
@@ -176,11 +256,11 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPa
         "-j", "--n-jobs", type=int, default=-1,
         help="Number of parallel workers. -1 uses all cores (default).",
     )
-    parser.set_defaults(func=run)
+    parser.set_defaults(func=run_extract)
     return parser
 
 
-def run(args: argparse.Namespace) -> int:
+def run_extract(args: argparse.Namespace) -> int:
     if args.n_jobs != -1 and args.n_jobs < 1:
         raise ValueError(f"n_jobs must be -1 or >= 1, got {args.n_jobs}")
 
@@ -214,8 +294,9 @@ def run(args: argparse.Namespace) -> int:
     chroms, starts, ends = chroms[order], starts[order], ends[order]
 
     effective_n_jobs = joblib.cpu_count() if args.n_jobs == -1 else args.n_jobs
-    chunks_per_bw = max(1, effective_n_jobs // len(args.bigwigs))
-    slices = _chunk_slices(n, chunks_per_bw)
+    # Size chunks to fill the thread pool; joblib will schedule the
+    # (bigwig, slice) cross-product across workers.
+    slices = _chunk_slices(n, effective_n_jobs)
 
     tasks = [(bw_idx, sl, bw_path)
              for bw_idx, bw_path in enumerate(args.bigwigs)
@@ -226,19 +307,30 @@ def run(args: argparse.Namespace) -> int:
     )
 
     per_bw_means = [np.zeros(n, dtype=np.float64) for _ in args.bigwigs]
-    per_bw_issues: list[set[str]] = [set() for _ in args.bigwigs]
+    per_bw_issues: list[dict[str, str]] = [{} for _ in args.bigwigs]
     for (bw_idx, sl, _), (means, issues) in zip(tasks, results, strict=True):
         per_bw_means[bw_idx][sl] = means
-        per_bw_issues[bw_idx] |= issues
+        # First-seen example chrom per issue per bigWig — preserved across
+        # chunks (don't clobber an earlier example with a later one).
+        for k, v in issues.items():
+            per_bw_issues[bw_idx].setdefault(k, v)
 
     out = regions.copy()
-    all_issues: set[str] = set()
-    for stem, sorted_means, issues in zip(stems, per_bw_means, per_bw_issues, strict=True):
+    for stem, sorted_means in zip(stems, per_bw_means, strict=True):
         out[stem] = sorted_means[inverse_order]
-        all_issues |= issues
 
-    for key in sorted(all_issues):
-        warnings.warn(_WARNING_MESSAGES[key], FertilizerWarning, stacklevel=2)
+    for bw_path, issues in zip(args.bigwigs, per_bw_issues, strict=True):
+        if not issues:
+            continue
+        try:
+            chroms_in_bw = list(_get_bw(bw_path).chroms().keys())
+        except Exception:
+            chroms_in_bw = []
+        for key in sorted(issues):
+            warnings.warn(
+                _format_issue_warning(key, bw_path, issues[key], chroms_in_bw),
+                FertilizerWarning, stacklevel=2,
+            )
 
     if n > 0:
         signal_block = out[stems].to_numpy()
@@ -251,5 +343,10 @@ def run(args: argparse.Namespace) -> int:
                 FertilizerWarning, stacklevel=2,
             )
 
-    out.to_csv(args.output, sep="\t", index=False)
+    # Write a metadata header so `fertilizer enrich` can verify that the
+    # aggregation used here is compatible with the NB-GLM it applies.
+    # Output is gzipped transparently when args.output ends in .gz.
+    with _open_text_write(args.output) as fh:
+        fh.write(f"# fertilizer-extract stat={args.stat}\n")
+        out.to_csv(fh, sep="\t", index=False)
     return 0

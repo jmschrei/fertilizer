@@ -15,7 +15,9 @@ from fertilizer.extract import (
     _chunk_slices,
     bigwig_region_means,
     load_regions,
-    run,
+)
+from fertilizer.extract import (
+    run_extract as run,
 )
 
 
@@ -103,12 +105,35 @@ class TestLoadRegions:
         assert len(df) == 3
         assert df["chrom"].tolist() == ["chr1", "chr2", "chr3"]
 
-    def test_ignores_extra_columns(self, tmp_path):
+    def test_bed6_columns_pass_through(self, tmp_path):
+        """BED6 columns (name, score, strand) are kept under conventional
+        names so a downstream `enrich` output retains peak IDs."""
         path = tmp_path / "a.bed"
-        _write_bed(path, [("chr1", 0, 100, "name", "500", "+")])
+        _write_bed(path, [("chr1", 0, 100, "peakA", "500", "+")])
         df = load_regions([str(path)])
-        assert list(df.columns) == ["chrom", "start", "end"]
-        assert df.iloc[0].tolist() == ["chr1", 0, 100]
+        assert list(df.columns) == ["chrom", "start", "end", "name", "score", "strand"]
+        assert df.iloc[0].tolist() == ["chr1", 0, 100, "peakA", 500, "+"]
+
+    def test_narrowpeak_columns_pass_through(self, tmp_path):
+        """narrowPeak (BED6+4) columns past BED6 get generic names because
+        BED12 and narrowPeak disagree on the meaning of columns 7-10. The
+        data is preserved either way."""
+        path = tmp_path / "a.bed"
+        _write_bed(path, [
+            ("chr1", 0, 100, "p1", "500", ".", "10.5", "2.3", "1.8", "50"),
+        ])
+        df = load_regions([str(path)])
+        assert list(df.columns) == [
+            "chrom", "start", "end", "name", "score", "strand",
+            "bed_col_6", "bed_col_7", "bed_col_8", "bed_col_9",
+        ]
+        assert df.iloc[0]["bed_col_6"] == 10.5
+
+    def test_bed_with_fewer_than_3_cols_errors(self, tmp_path):
+        path = tmp_path / "bad.bed"
+        _write_bed(path, [("chr1", 0)])
+        with pytest.raises(ValueError, match="at least 3"):
+            load_regions([str(path)])
 
     def test_numeric_chroms_stay_strings(self, tmp_path):
         path = tmp_path / "a.bed"
@@ -402,7 +427,7 @@ class TestMultiChromSparseBigwig:
             warnings.simplefilter("error", FertilizerWarning)
             run(args)
 
-        df = pd.read_csv(out, sep="\t")
+        df = pd.read_csv(out, sep="\t", comment="#")
         assert df["chrom"].tolist() == ["chr2", "chr1", "chr3", "chr1", "chr2", "chr1"]
         assert df["start"].tolist() == [1000, 100, 0, 400, 500, 100]
         np.testing.assert_allclose(
@@ -417,10 +442,10 @@ class TestRun:
         out = tmp_path / "out.tsv"
         args = _make_args([dense_bw, empty_bw, sparse_bw], [bed], out)
 
-        with pytest.warns(FertilizerWarning, match="not present"):
+        with pytest.warns(FertilizerWarning, match="missing from bigWig"):
             assert run(args) == 0
 
-        df = pd.read_csv(out, sep="\t")
+        df = pd.read_csv(out, sep="\t", comment="#")
         assert list(df.columns) == ["chrom", "start", "end", "dense", "empty", "sparse"]
         assert len(df) == 3
         # chr2:0-100 is a missing-chrom locus in every bigWig -> 0.0 everywhere.
@@ -440,8 +465,9 @@ class TestRun:
             warnings.simplefilter("error", FertilizerWarning)
             assert run(args) == 0
 
-    def test_missing_chrom_warning_emitted_once(self, tmp_path, dense_bw):
-        # Many regions with missing chroms across two bigwigs -> still one warning.
+    def test_missing_chrom_warning_per_bigwig(self, tmp_path, dense_bw):
+        # Many regions with missing chroms across two bigwigs -> one warning
+        # per affected bigWig (each names the offending path explicitly).
         other = tmp_path / "dense2.bw"
         bw = pyBigWig.open(str(other), "w")
         bw.addHeader([("chr1", 1000)])
@@ -458,8 +484,12 @@ class TestRun:
             run(args)
         missing = [w for w in recorded
                    if issubclass(w.category, FertilizerWarning)
-                   and "not present" in str(w.message)]
-        assert len(missing) == 1
+                   and "missing from bigWig" in str(w.message)]
+        assert len(missing) == 2
+        # Each bigWig is named in at least one warning.
+        msgs = " ".join(str(m.message) for m in missing)
+        assert str(dense_bw) in msgs
+        assert str(other) in msgs
 
     def test_each_issue_type_warns_once(self, tmp_path, dense_bw):
         bed = tmp_path / "a.bed"
@@ -500,7 +530,7 @@ class TestRun:
         args = _make_args([dense_bw, sparse_bw], [bed], out,
                           names=["TrackA", "TrackB"])
         run(args)
-        df = pd.read_csv(out, sep="\t")
+        df = pd.read_csv(out, sep="\t", comment="#")
         assert list(df.columns) == ["chrom", "start", "end", "TrackA", "TrackB"]
 
     def test_names_wrong_length_rejected(self, tmp_path, dense_bw, sparse_bw):
@@ -536,7 +566,7 @@ class TestRun:
         args = _make_args([dense_bw, dense_bw], [bed], out,
                           names=["TrackA", "TrackB"])
         run(args)
-        df = pd.read_csv(out, sep="\t")
+        df = pd.read_csv(out, sep="\t", comment="#")
         assert list(df.columns) == ["chrom", "start", "end", "TrackA", "TrackB"]
         np.testing.assert_allclose(df["TrackA"].tolist(), df["TrackB"].tolist())
 
@@ -557,7 +587,7 @@ class TestRun:
             warnings.simplefilter("error", FertilizerWarning)
             run(args)
 
-        df = pd.read_csv(out, sep="\t", dtype={"chrom": str})
+        df = pd.read_csv(out, sep="\t", comment="#", dtype={"chrom": str})
         np.testing.assert_allclose(df["numeric"].tolist(), [3.0, 9.0])
 
     def test_output_preserves_input_order_after_sort(self, tmp_path, dense_bw):
@@ -573,7 +603,7 @@ class TestRun:
         args = _make_args([dense_bw], [bed], out)
         run(args)
 
-        df = pd.read_csv(out, sep="\t")
+        df = pd.read_csv(out, sep="\t", comment="#")
         assert df["start"].tolist() == [500, 0, 250]
         assert df["end"].tolist() == [1000, 500, 750]
         np.testing.assert_allclose(df["dense"].tolist(), [6.0, 2.0, 4.0])
@@ -584,7 +614,7 @@ class TestRun:
         out = tmp_path / "out.tsv"
         args = _make_args([dense_bw], [bed], out)
         run(args)
-        df = pd.read_csv(out, sep="\t")
+        df = pd.read_csv(out, sep="\t", comment="#")
         assert list(df.columns) == ["chrom", "start", "end", "dense"]
         assert len(df) == 0
 
@@ -604,8 +634,8 @@ class TestRun:
         run(_make_args([dense_bw, sparse_bw], [bed], serial_out, n_jobs=1))
         run(_make_args([dense_bw, sparse_bw], [bed], parallel_out, n_jobs=2))
 
-        a = pd.read_csv(serial_out, sep="\t")
-        b = pd.read_csv(parallel_out, sep="\t")
+        a = pd.read_csv(serial_out, sep="\t", comment="#")
+        b = pd.read_csv(parallel_out, sep="\t", comment="#")
         pd.testing.assert_frame_equal(a, b)
 
 
@@ -617,7 +647,7 @@ class TestStat:
         _write_bed(bed, [("chr1", 0, 1000)])
         out = tmp_path / "out.tsv"
         run(_make_args([dense_bw], [bed], out))
-        df = pd.read_csv(out, sep="\t")
+        df = pd.read_csv(out, sep="\t", comment="#")
         # Mean of [2.0 over 500 bp, 6.0 over 500 bp] = 4.0
         np.testing.assert_allclose(df["dense"].tolist(), [4.0])
 
@@ -626,7 +656,7 @@ class TestStat:
         _write_bed(bed, [("chr1", 0, 1000)])
         out = tmp_path / "out.tsv"
         run(_make_args([dense_bw], [bed], out, stat="max"))
-        df = pd.read_csv(out, sep="\t")
+        df = pd.read_csv(out, sep="\t", comment="#")
         np.testing.assert_allclose(df["dense"].tolist(), [6.0])
 
     def test_min(self, tmp_path, dense_bw):
@@ -634,7 +664,7 @@ class TestStat:
         _write_bed(bed, [("chr1", 0, 1000)])
         out = tmp_path / "out.tsv"
         run(_make_args([dense_bw], [bed], out, stat="min"))
-        df = pd.read_csv(out, sep="\t")
+        df = pd.read_csv(out, sep="\t", comment="#")
         np.testing.assert_allclose(df["dense"].tolist(), [2.0])
 
     def test_sum(self, tmp_path, dense_bw):
@@ -642,7 +672,7 @@ class TestStat:
         _write_bed(bed, [("chr1", 0, 1000)])
         out = tmp_path / "out.tsv"
         run(_make_args([dense_bw], [bed], out, stat="sum"))
-        df = pd.read_csv(out, sep="\t")
+        df = pd.read_csv(out, sep="\t", comment="#")
         # 500*2.0 + 500*6.0 = 4000
         np.testing.assert_allclose(df["dense"].tolist(), [4000.0])
 
@@ -654,7 +684,7 @@ class TestStat:
         _write_bed(bed, [("chr1", 0, 1000)])
         out = tmp_path / "out.tsv"
         run(_make_args([dense_bw], [bed], out, stat="std"))
-        df = pd.read_csv(out, sep="\t")
+        df = pd.read_csv(out, sep="\t", comment="#")
         np.testing.assert_allclose(df["dense"].tolist(), [np.sqrt(4000 / 999)], rtol=1e-6)
 
     def test_coverage_on_sparse(self, tmp_path, sparse_bw):
@@ -663,7 +693,7 @@ class TestStat:
         _write_bed(bed, [("chr1", 0, 1000), ("chr1", 0, 100)])
         out = tmp_path / "out.tsv"
         run(_make_args([sparse_bw], [bed], out, stat="coverage"))
-        df = pd.read_csv(out, sep="\t")
+        df = pd.read_csv(out, sep="\t", comment="#")
         # Coverage = fraction of region with signal.
         np.testing.assert_allclose(df["sparse"].tolist(), [0.1, 1.0])
 

@@ -20,10 +20,14 @@ This writes:
 fertilizer extract \
     -w examples/A.bw examples/B.bw examples/C.bw \
     -b examples/regions.bed \
-    -o examples/signals.tsv
+    -o examples/signals.tsv \
+    -s sum
 ```
 
-`signals.tsv` will have columns `chrom start end A B C`.
+`signals.tsv` will have columns `chrom start end A B C`. `-s sum` is
+required here because the downstream `enrich` NB-GLM assumes count-like
+input — `extract` writes the chosen stat into a metadata header and
+`enrich` refuses non-`sum` input unless `--allow-non-sum` is passed.
 
 ## 3. Call enrichment
 
@@ -38,9 +42,12 @@ fertilizer enrich \
 Stderr will print the size factors, the dispersion fit, the conservativeness
 of the test at K=3, and the number of loci that passed the threshold.
 
-`enrichment.tsv` should contain ~10 rows, each with `enriched_condition == C`
-and small q-values. If your run is non-deterministic (different RNG seed in
-`make_demo_data.py`) you may see slightly different counts.
+`enrichment.tsv` should contain ~10 rows with small q-values. With the
+default seed in `make_demo_data.py`, almost all are `enriched_condition == C`
+(matching the 10 boosted regions). The occasional non-C row is a false
+positive from the Poisson-noise background — expected at q ≤ 0.05 on 200
+loci, and a useful reminder that the FDR threshold is statistical, not
+absolute.
 
 ## Tearing down
 

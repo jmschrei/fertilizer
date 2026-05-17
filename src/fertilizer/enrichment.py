@@ -25,27 +25,33 @@ Pipeline per locus i, across K conditions (one observation per condition):
    its fit robustly trims upper-tail MoM estimates before weighted least
    squares. The final per-locus alpha is applied directly, not shrunk via
    empirical Bayes as in DESeq2 — we replace.
-4. Per locus, identify the top two conditions by size-factor-normalized
-   signal: k* = argmax_j (X_ij / s_j) and k_2 = argmax over j != k*. The
-   one-sided LRT compares these two conditions only; the other K - 2
-   conditions enter both models as saturated nuisance parameters and
-   cancel from the likelihood ratio. This design makes the test reject
-   genuine enrichment of k* above the rest of the distribution while
-   ignoring depletion patterns (where the top two conditions are both at
-   the high level and look essentially equal under the test).
-5. Null model on the top pair: mu_{k*} = mu_{k_2} = mu_top, fit by
-   intercept-only NB MLE on the two observations (X_{k*}, X_{k_2}) with
-   size factors (s_{k*}, s_{k_2}). Vectorized Newton's method on the
+4. Per locus, identify the top condition by size-factor-normalized signal:
+   k* = argmax_j (X_ij / s_j), and a background condition k_bg = the
+   condition at rank `background_rank` (default 3) in the sort by
+   normalized signal — rank 1 is k*, rank 2 is the second-highest, rank r
+   is the r-th largest. The one-sided LRT compares (k*, k_bg) only; the
+   other K - 2 conditions enter both models as saturated nuisance
+   parameters and cancel from the likelihood ratio. Comparing against a
+   rank > 2 makes the test robust to "competing peaks": at the default of
+   3, one second condition can be elevated without depressing the LRT.
+   The design also makes the test ignore depletion patterns (where the
+   conditions at ranks 1..k_bg all sit at the high level and look
+   essentially equal under the test).
+5. Null model on the pair: mu_{k*} = mu_{k_bg} = mu_top, fit by
+   intercept-only NB MLE on the two observations (X_{k*}, X_{k_bg}) with
+   size factors (s_{k*}, s_{k_bg}). Vectorized Newton's method on the
    score equation
-       sum_{j in {k*, k_2}} (X_j - mu_top s_j) / (1 + alpha mu_top s_j) = 0
+       sum_{j in {k*, k_bg}} (X_j - mu_top s_j) / (1 + alpha mu_top s_j) = 0
    starting from the Poisson closed-form MLE.
-6. Alternative on the top pair: saturated. mu_{k*} = X_{k*}/s_{k*},
-   mu_{k_2} = X_{k_2}/s_{k_2}, constrained mu_{k*} > mu_{k_2} (always
-   satisfied by construction since k* is the argmax).
-7. LRT_i = 2 * (logL_alt - logL_null) over the top two conditions,
-   chi-bar-squared({0, 1}) under H0 for fixed k*. We use the upper
-   half-chi^2(1) tail (factor of 1/2), then Bonferroni-correct by K to
-   account for picking k* as the empirical argmax. Final per-locus
+6. Alternative on the pair: saturated. mu_{k*} = X_{k*}/s_{k*},
+   mu_{k_bg} = X_{k_bg}/s_{k_bg}, constrained mu_{k*} > mu_{k_bg} (always
+   satisfied by construction since k* is the argmax and k_bg sits at a
+   lower rank).
+7. LRT_i = 2 * (logL_alt - logL_null) over the pair, chi-bar-squared({0, 1})
+   under H0 for fixed k*. We use the upper half-chi^2(1) tail (factor of
+   1/2), then Bonferroni-correct by K to account for picking k* as the
+   empirical argmax. The choice of k_bg is deterministic given the
+   condition ordering and adds no extra Bonferroni cost. Final per-locus
    p-value is min(K * 0.5 * chi2_1_sf(LRT), 1).
 8. Benjamini-Hochberg q-values across loci.
 
@@ -54,7 +60,7 @@ The effect size reported is
 the log2 fold change of the enriched condition vs the mean of the others
 on the size-factor-normalized scale. Always non-negative by construction
 (k* is the argmax). Note that this is a summary for users; the test
-itself is computed only from the top pair.
+itself is computed only from the (k*, k_bg) pair.
 
 Differences from DESeq2 (non-exhaustive, but the ones that matter):
 
@@ -79,12 +85,13 @@ Differences from DESeq2 (non-exhaustive, but the ones that matter):
 - **Arbitrary designs / two-sided LRT.** DESeq2's LRT supports `full` vs
   `reduced` formulas of arbitrary design matrices and is two-sided (it
   fires on both enrichment and depletion). We hard-code a 1-df one-sided
-  LRT comparing the top two conditions (largest and second-largest
-  normalized signal) per locus, with Bonferroni x K for picking the top
-  by argmax. Other K - 2 conditions enter both models as saturated
-  nuisance and cancel. Loci where one condition is *depleted* relative
-  to the others (the top two conditions then both sit at the high level
-  and look indistinguishable) are not called.
+  LRT comparing the top condition against a background condition at a
+  user-chosen rank (`background_rank`, default 3, which tolerates one
+  competing peak), with Bonferroni x K for picking the top by argmax.
+  Other K - 2 conditions enter both models as saturated nuisance and
+  cancel. Loci where one condition is *depleted* relative to the others
+  (the top conditions then all sit at the high level and look
+  indistinguishable) are not called.
 - **Independent filtering.** DESeq2 filters low-count loci out of
   multiple-testing correction to maximize power at a given alpha. We don't
   (but users can set `--min-signal` high and post-filter themselves).
@@ -93,6 +100,17 @@ Differences from DESeq2 (non-exhaustive, but the ones that matter):
   for any non-negative float input. This matches the common practice of
   passing fractional RSEM/salmon expected counts to DESeq2 via tximport,
   and is required here because bigWig-extracted signal is real-valued.
+
+Background-rank knob:
+
+- `background_rank=3` (default): k* compared against the 3rd-ranked
+  condition. Tolerates one competing peak (rank 2 can be elevated
+  without depressing the LRT) and is K-independent.
+- `background_rank=2`: k* compared against the second-highest condition.
+  Maximally powerful when only one condition is active at a locus, but
+  fragile when a second condition is also elevated.
+- Larger values tolerate more competing peaks at the cost of comparing
+  against an increasingly-low background condition. Capped to K.
 
 Dispersion model knobs:
 
@@ -113,6 +131,7 @@ Dispersion model knobs:
 from __future__ import annotations
 
 import argparse
+import gzip
 import sys
 import warnings
 from dataclasses import dataclass
@@ -122,6 +141,16 @@ import pandas as pd
 from scipy.optimize import least_squares
 from scipy.special import gammaln
 from scipy.stats import chi2
+
+__all__ = [
+    "EnrichmentResult",
+    "FertilizerEnrichmentWarning",
+    "bh_qvalues",
+    "enrichment_analysis",
+    "run_enrich",
+    "size_factors",
+    "size_factors_with_n",
+]
 
 
 class FertilizerEnrichmentWarning(UserWarning):
@@ -139,8 +168,15 @@ class EnrichmentResult:
     lrt_stat: np.ndarray                      # (n_loci,) one-sided LRT test statistic
     p_value: np.ndarray                       # (n_loci,) Bonferroni-corrected
     q_value: np.ndarray                       # (n_loci,)
-    enriched_condition_idx: np.ndarray        # (n_loci,) argmax(X / s)
+    enriched_condition_idx: np.ndarray        # (n_loci,) argmax(X / s); always
+                                              # populated, so only meaningful for
+                                              # loci that pass a significance
+                                              # threshold (on a null locus it is
+                                              # just the column highest under noise)
     effect_size_pc_dominated: np.ndarray      # (n_loci,) bool; true when some X_j/s_j < pc
+    lrt_zero_dominated: np.ndarray            # (n_loci,) bool; true when X_top==0 or X_bg==0
+    lrt_convergence_failed: np.ndarray        # (n_loci,) bool; true when null-fit NB MLE failed
+    background_rank: int                      # k actually used (== min(requested, K))
 
 
 def size_factors(counts: np.ndarray) -> np.ndarray:
@@ -340,8 +376,8 @@ def _intercept_mle(
     alpha: np.ndarray,
     max_iter: int = 50,
     tol: float = 1e-8,
-) -> np.ndarray:
-    """Intercept-only NB GLM MLE per locus on the top-pair sub-arrays.
+) -> tuple[np.ndarray, np.ndarray]:
+    """Intercept-only NB GLM MLE per locus on the (k*, k_bg) sub-arrays.
 
     Solves sum_j (X_ij - mu_0 s_ij) / (1 + alpha_i mu_0 s_ij) = 0 for
     mu_0 per locus, via vectorized Newton's method starting from the
@@ -349,9 +385,11 @@ def _intercept_mle(
     so Newton's method converges quickly with no stepsize control.
 
     `counts` and `sf` are both (n_loci, 2) — one row per locus, holding
-    the values for that locus's top two conditions (k*, k_2) with their
-    respective size factors. `alpha` is (n_loci,) or scalar. Returns
-    mu_0 of shape (n_loci,).
+    the values for that locus's (k*, k_bg) pair with their respective size
+    factors. `alpha` is (n_loci,) or scalar. Returns (mu_0, converged),
+    both of shape (n_loci,). `converged[i]` is False for loci whose final
+    Newton step did not fall below `tol`; downstream consumers should treat
+    those loci's LRT statistic as unreliable.
     """
     counts = np.asarray(counts, dtype=np.float64)
     sf = np.asarray(sf, dtype=np.float64)
@@ -364,10 +402,11 @@ def _intercept_mle(
 
     needs_iter = alpha > _POISSON_CUTOFF
     if not needs_iter.any():
-        return mu0
+        # Poisson closed form is exact; everything converged trivially.
+        return mu0, np.ones(counts.shape[0], dtype=bool)
 
     alpha_c = alpha[:, None]
-    converged = False
+    per_locus_change = np.full(counts.shape[0], np.inf)
     for _ in range(max_iter):
         mu_ij = mu0[:, None] * sf
         denom = 1.0 + alpha_c * mu_ij
@@ -378,21 +417,26 @@ def _intercept_mle(
         f_prime = np.minimum(f_prime, -1e-20)
         step = np.where(needs_iter, f / f_prime, 0.0)
         mu0_new = np.maximum(mu0 - step, 1e-20)
-        max_change = float(np.max(np.abs(mu0_new - mu0)))
+        per_locus_change = np.abs(mu0_new - mu0)
         mu0 = mu0_new
-        if max_change < tol:
-            converged = True
+        if float(per_locus_change.max()) < tol:
             break
 
-    if not converged:
+    # Loci that didn't need NB iteration are trivially converged; others must
+    # have driven their Newton step below `tol`.
+    converged = ~needs_iter | (per_locus_change < tol)
+    n_failed = int((~converged).sum())
+    if n_failed > 0:
+        worst = int(np.argmax(per_locus_change))
         warnings.warn(
-            f"intercept-only NB MLE did not converge for at least one locus "
-            f"after {max_iter} iterations (max change {max_change:.3g}); "
-            "p-values for those loci may be slightly miscalibrated. "
-            "Consider passing --dispersion or fewer extreme counts.",
+            f"intercept-only NB MLE did not converge for {n_failed} locus/loci "
+            f"after {max_iter} iterations (worst locus index {worst}, "
+            f"final step {float(per_locus_change[worst]):.3g}); p-values for "
+            "these loci will be set to 1.0 and `lrt_convergence_failed=True` "
+            "in the result.",
             FertilizerEnrichmentWarning, stacklevel=3,
         )
-    return mu0
+    return mu0, converged
 
 
 def enrichment_analysis(
@@ -403,18 +447,30 @@ def enrichment_analysis(
     dispersion_override: float | None = None,
     size_factor_warn_ratio: float = 5.0,
     size_factors_override: np.ndarray | None = None,
+    background_rank: int = 3,
 ) -> EnrichmentResult:
     """NB-GLM enrichment LRT across >=2 conditions with a common dispersion trend.
 
-    Per locus, identifies the top two conditions by size-factor-normalized
-    signal (k* = argmax, k_2 = second-argmax) and runs a 1-df one-sided
-    LRT of `mu_{k*} = mu_{k_2}` vs `mu_{k*} > mu_{k_2}` on that pair.
-    The other K - 2 conditions enter both models as saturated nuisance
+    Per locus, identifies the top condition (k* = argmax of size-factor-
+    normalized signal) and a background condition (k_bg = the condition at
+    rank `background_rank` when conditions are sorted by normalized signal,
+    where rank 1 is k*, rank 2 is the second-highest, etc.) and runs a 1-df
+    one-sided LRT of `mu_{k*} = mu_{k_bg}` vs `mu_{k*} > mu_{k_bg}` on that
+    pair. The other K - 2 conditions enter both models as saturated nuisance
     and cancel from the likelihood ratio. The p-value is Bonferroni-
     corrected by K for the data-driven argmax. Loci where a single
     condition is *depleted* relative to the others are not called: under
-    depletion, k* and k_2 both sit at the high level and the LRT is
+    depletion, the top conditions all sit at the high level and the LRT is
     near zero.
+
+    `background_rank` controls robustness to "competing peaks". With the
+    default of 3, the LRT compares k* against the 3rd-ranked condition,
+    so a single second condition that is also active does not depress the
+    test statistic. Higher values tolerate more competing peaks at the cost
+    of comparing against an increasingly-low background. `background_rank=2`
+    compares against the second-highest condition. `background_rank` is
+    capped to K when larger (so the default works at K=2 without
+    special-casing).
 
     Parameters
     ----------
@@ -445,6 +501,11 @@ def enrichment_analysis(
         the package's null-majority median-of-ratios. The corresponding
         EnrichmentResult.n_loci_for_size_factors is reported as 0 to signal
         that no loci were used to derive it.
+    background_rank
+        Rank (1 = k*, 2 = second-highest, ...) of the condition used as the
+        background in the LRT pair. Default 3 (compare k* against the 3rd
+        condition, tolerating one competing peak). Must be >= 2. Capped to
+        K when larger.
     """
     counts = np.asarray(counts, dtype=np.float64)
     if counts.ndim != 2 or counts.shape[1] < 2:
@@ -460,7 +521,14 @@ def enrichment_analysis(
             "-inf in the effect-size log2 transform whenever a condition "
             "is exactly zero"
         )
+    if not isinstance(background_rank, (int, np.integer)) or background_rank < 2:
+        raise ValueError(
+            f"background_rank must be an integer >= 2 (got {background_rank!r}); "
+            "rank 2 compares k* against the second-highest condition, 3 against "
+            "the third-highest (tolerating one competing peak), and so on."
+        )
     n_loci, K = counts.shape
+    effective_rank = min(int(background_rank), K)
 
     if size_factors_override is not None:
         sf = np.asarray(size_factors_override, dtype=np.float64)
@@ -560,39 +628,46 @@ def enrichment_analysis(
     else:
         raise ValueError(f"unknown fit_type: {fit_type!r}")
 
-    # Identify the top-two conditions per locus by size-factor-normalized
-    # signal. The K - 2 conditions outside this pair enter null and alt as
-    # saturated nuisance parameters that cancel from the LRT.
-    enriched_idx = normalized.argmax(axis=1)
-    normalized_masked = normalized.copy()
+    # Identify k* (argmax) and the background condition (rank `effective_rank`
+    # in the sort by size-factor-normalized signal). The other K - 2 conditions
+    # enter null and alt as saturated nuisance parameters that cancel from
+    # the LRT. Sorting ascending with argsort, the j-th largest sits at
+    # position -j, so rank-1 = order[:, -1] = k* and rank-r = order[:, -r].
+    order = np.argsort(normalized, axis=1)
     row_arange = np.arange(n_loci)
-    normalized_masked[row_arange, enriched_idx] = -np.inf
-    second_idx = normalized_masked.argmax(axis=1)
+    enriched_idx = order[:, -1]
+    bg_idx = order[:, -effective_rank]
 
     x_top = counts[row_arange, enriched_idx]
-    x_two = counts[row_arange, second_idx]
+    x_bg = counts[row_arange, bg_idx]
     s_top = sf[enriched_idx]
-    s_two = sf[second_idx]
+    s_bg = sf[bg_idx]
+    # Flag loci where the LRT pair contains a zero. These produce very small
+    # p-values driven by mu_alt ~ 0 (clipped to 1e-20) rather than by data,
+    # and tend to dominate the top of any sparse-data output as spurious
+    # hits (e.g. a region of poor mappability in some tracks).
+    lrt_zero_dominated = (x_top == 0) | (x_bg == 0)
 
-    # Null fit on the top pair: shared mu_top via intercept-only NB MLE.
-    top_pair_counts = np.column_stack([x_top, x_two])
-    top_pair_sf = np.column_stack([s_top, s_two])
-    mu_top = _intercept_mle(top_pair_counts, top_pair_sf, alpha)
+    # Null fit on the pair: shared mu via intercept-only NB MLE.
+    pair_counts = np.column_stack([x_top, x_bg])
+    pair_sf = np.column_stack([s_top, s_bg])
+    mu_top, mle_converged = _intercept_mle(pair_counts, pair_sf, alpha)
     mu_null_top = np.maximum(mu_top * s_top, 1e-20)
-    mu_null_two = np.maximum(mu_top * s_two, 1e-20)
+    mu_null_bg = np.maximum(mu_top * s_bg, 1e-20)
+    lrt_convergence_failed = ~mle_converged
 
-    # Alternative fit on the top pair: saturated. Constraint mu_{k*} >
-    # mu_{k_2} is satisfied by construction (k* is the argmax of X/s).
+    # Alternative fit on the pair: saturated. Constraint mu_{k*} > mu_{k_bg}
+    # is satisfied by construction (k* is the argmax of X/s, k_bg is lower).
     mu_alt_top = np.maximum(x_top, 1e-20)
-    mu_alt_two = np.maximum(x_two, 1e-20)
+    mu_alt_bg = np.maximum(x_bg, 1e-20)
 
     ll_alt = (
         _nb_logpmf(x_top, mu_alt_top, alpha)
-        + _nb_logpmf(x_two, mu_alt_two, alpha)
+        + _nb_logpmf(x_bg, mu_alt_bg, alpha)
     )
     ll_null = (
         _nb_logpmf(x_top, mu_null_top, alpha)
-        + _nb_logpmf(x_two, mu_null_two, alpha)
+        + _nb_logpmf(x_bg, mu_null_bg, alpha)
     )
     lrt_stat = np.clip(2.0 * (ll_alt - ll_null), 0.0, None)
 
@@ -601,6 +676,10 @@ def enrichment_analysis(
     # The K-2 nuisance conditions contribute no df and need no correction.
     p_one_sided = np.where(lrt_stat > 0, 0.5 * chi2.sf(lrt_stat, df=1), 1.0)
     p_value = np.minimum(K * p_one_sided, 1.0)
+    # For loci where the null-fit NB MLE didn't converge, the LRT is
+    # unreliable; surface a p-value of 1.0 so users can't accidentally
+    # call these as hits.
+    p_value = np.where(lrt_convergence_failed, 1.0, p_value)
     q_value = bh_qvalues(p_value)
 
     # Effect size: log2((X_{k*}/s_{k*}) + pc) - log2(mean_{j!=k*}(X_j/s_j) + pc).
@@ -632,7 +711,25 @@ def enrichment_analysis(
         q_value=q_value,
         enriched_condition_idx=enriched_idx,
         effect_size_pc_dominated=effect_size_pc_dominated,
+        lrt_zero_dominated=lrt_zero_dominated,
+        lrt_convergence_failed=lrt_convergence_failed,
+        background_rank=effective_rank,
     )
+
+
+_ENRICH_EPILOG = """\
+Example:
+  fertilizer enrich -i signals.tsv -c A B C -o enrichment.tsv
+
+  # keep all loci (for QC / volcano plots):
+  fertilizer enrich -i signals.tsv -c A B C -o all.tsv --q-threshold 1.0
+
+  # external normalization (spike-in / pre-normalized tracks):
+  fertilizer enrich -i signals.tsv -c A B C -o out.tsv --size-factors 1 1 1
+
+See the README for full docs:
+https://github.com/jmschrei/fertilizer#fertilizer-enrich--enrichment-analysis
+"""
 
 
 def add_subparser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
@@ -640,6 +737,8 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPa
     parser = subparsers.add_parser(
         "enrich",
         help="Find regions where one condition is enriched over the others.",
+        epilog=_ENRICH_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
             "Enrichment NB-GLM likelihood-ratio test across conditions, "
             "adapted from DESeq2 for the one-replicate-per-condition setting. "
@@ -690,11 +789,77 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPa
                              "normalization you trust more (RPM/RPKM, "
                              "spike-in). Pass `1 1 1 ...` to disable "
                              "normalization entirely.")
-    parser.set_defaults(func=run)
+    parser.add_argument(
+        "--allow-non-sum", action="store_true",
+        help="Bypass the check that the input was produced by `fertilizer "
+             "extract --stat sum`. The NB-GLM likelihood assumes count-like "
+             "data; `mean`/`max`/`min`/`std`/`coverage` are not counts and "
+             "the reported p-values may be miscalibrated. Use only when you "
+             "have empirically verified calibration on your data.",
+    )
+    parser.add_argument("--background-rank", type=int, default=3, metavar="K",
+                        help="Rank (1 = enriched condition, 2 = "
+                             "second-highest, ...) of the condition "
+                             "compared against the enriched one in the LRT "
+                             "pair. Default 3 (tolerates one competing "
+                             "peak). Larger values tolerate more competing "
+                             "peaks; 2 compares directly against the "
+                             "second-highest condition. Capped to the "
+                             "number of conditions when larger.")
+    parser.set_defaults(func=run_enrich)
     return parser
 
 
-def run(args: argparse.Namespace) -> int:
+def _warn_if_regions_overlap(df: pd.DataFrame) -> None:
+    """Emit a FertilizerEnrichmentWarning when input regions are not
+    disjoint. BH-FDR validity assumes independent (or PRDS) tests; densely
+    overlapping windows violate this and q-values become optimistic.
+
+    Only fires when chrom/start/end columns are present and the overlap
+    fraction exceeds a small noise threshold. Silent for the common case
+    of an unrelated TSV (no coord columns) or a clean non-overlapping
+    region set.
+    """
+    cols = {"chrom", "start", "end"}
+    if not cols.issubset(df.columns) or len(df) < 2:
+        return
+    sorted_df = df[["chrom", "start", "end"]].sort_values(
+        ["chrom", "start", "end"]
+    ).reset_index(drop=True)
+    same_chrom = sorted_df["chrom"].values[1:] == sorted_df["chrom"].values[:-1]
+    overlap = sorted_df["start"].values[1:] < sorted_df["end"].values[:-1]
+    overlap_frac = float((same_chrom & overlap).sum()) / max(len(sorted_df) - 1, 1)
+    if overlap_frac > 0.01:
+        warnings.warn(
+            f"{overlap_frac:.1%} of adjacent regions overlap; BH-FDR assumes "
+            "independent (or positively dependent) tests, and densely "
+            "overlapping windows violate this — reported q-values will be "
+            "optimistic. Thin to non-overlapping regions if possible.",
+            FertilizerEnrichmentWarning, stacklevel=2,
+        )
+
+
+def _read_extract_stat(path: str) -> str | None:
+    """Return the `stat=` value from a `fertilizer extract` metadata header,
+    or None if the input lacks one (e.g. user-supplied TSV). Transparently
+    handles `.gz` inputs."""
+    opener = gzip.open if str(path).endswith(".gz") else open
+    try:
+        with opener(path, "rt") as fh:
+            first = fh.readline()
+    except OSError:
+        return None
+    if not first.startswith("#"):
+        return None
+    # Expected form: "# fertilizer-extract stat=<value>\n"
+    parts = first.lstrip("#").strip().split()
+    for tok in parts:
+        if tok.startswith("stat="):
+            return tok.split("=", 1)[1]
+    return None
+
+
+def run_enrich(args: argparse.Namespace) -> int:
     if len(args.conditions) < 2:
         raise ValueError("need at least 2 conditions to run enrichment analysis")
     if not 0.0 <= args.q_threshold <= 1.0:
@@ -706,8 +871,25 @@ def run(args: argparse.Namespace) -> int:
             f"--pseudocount must be > 0 (got {args.pseudocount}); pc=0 "
             "produces -inf effect sizes on zero-valued conditions"
         )
+    if args.background_rank < 2:
+        raise ValueError(
+            f"--background-rank must be >= 2 (got {args.background_rank}); "
+            "rank 2 compares against the second-highest condition, 3 against "
+            "the third-highest (tolerating one competing peak), and so on."
+        )
 
-    df = pd.read_csv(args.input, sep="\t", dtype={"chrom": str})
+    extract_stat = _read_extract_stat(args.input)
+    if extract_stat is not None and extract_stat != "sum" and not args.allow_non_sum:
+        raise ValueError(
+            f"input was produced by `fertilizer extract --stat {extract_stat}`, "
+            "which aggregates bigWig signal in a way that is NOT count-like; "
+            "the NB-GLM likelihood used by `enrich` assumes count-like data. "
+            "Re-run extract with `--stat sum`, or pass `--allow-non-sum` "
+            "to bypass this check at your own risk (p-values may be miscalibrated)."
+        )
+
+    df = pd.read_csv(args.input, sep="\t", dtype={"chrom": str}, comment="#")
+    _warn_if_regions_overlap(df)
     missing = [c for c in args.conditions if c not in df.columns]
     if missing:
         raise ValueError(f"columns not found in {args.input}: {missing}")
@@ -728,22 +910,23 @@ def run(args: argparse.Namespace) -> int:
         dispersion_min_signal=args.min_signal,
         dispersion_override=args.dispersion,
         size_factors_override=sf_override,
+        background_rank=args.background_rank,
     )
 
-    out = df.copy()
-    out["effect_size"] = result.effect_size
-    out["p_value"] = result.p_value
-    out["q_value"] = result.q_value
-    out["enriched_condition"] = np.asarray(args.conditions)[result.enriched_condition_idx]
-    # Only emit the pc-dominated flag column when at least one locus is
-    # flagged — keeps the common case (all data well above pc) clean.
-    if result.effect_size_pc_dominated.any():
-        out["effect_size_pc_dominated"] = result.effect_size_pc_dominated
+    df["effect_size"] = result.effect_size
+    df["p_value"] = result.p_value
+    df["q_value"] = result.q_value
+    df["enriched_condition"] = np.asarray(args.conditions)[result.enriched_condition_idx]
+    # Boolean flag columns are always emitted (all-False if nothing tripped)
+    # so downstream parsers can rely on a stable schema.
+    df["effect_size_pc_dominated"] = result.effect_size_pc_dominated
+    df["lrt_zero_dominated"] = result.lrt_zero_dominated
+    df["lrt_convergence_failed"] = result.lrt_convergence_failed
 
-    mask = out["q_value"] <= args.q_threshold
+    mask = df["q_value"] <= args.q_threshold
     if args.p_threshold is not None:
-        mask &= out["p_value"] <= args.p_threshold
-    out = out.loc[mask]
+        mask &= df["p_value"] <= args.p_threshold
+    out = df.loc[mask].reset_index(drop=True)
 
     # Emit diagnostics before writing so they're visible even if the write fails.
     for cond, sf_val in zip(args.conditions, result.size_factors, strict=True):
@@ -764,12 +947,40 @@ def run(args: argparse.Namespace) -> int:
         file=sys.stderr,
     )
     K = len(args.conditions)
+    rank_note = ""
+    if args.background_rank > K:
+        rank_note = (
+            f" (requested {args.background_rank}, capped to K)"
+        )
     print(
-        f"conservativeness: 1-df chi-bar-squared null with Bonferroni x K={K} for "
-        f"the data-driven argmax. At K={K} the test runs roughly "
-        f"{_expected_t1_at_05(K):.0%} of nominal at alpha=0.05.",
+        f"background rank: {result.background_rank}{rank_note} "
+        f"(k* compared against the rank-{result.background_rank} condition; "
+        f"higher = more robust to competing peaks)",
         file=sys.stderr,
     )
+    expected_t1 = _expected_t1_at_05(K, result.background_rank)
+    print(
+        f"conservativeness: 1-df chi-bar-squared null with Bonferroni x K={K} for "
+        f"the data-driven argmax. At K={K}, rank={result.background_rank}, "
+        f"empirical T1@alpha=0.05 ~= {expected_t1:.3f}.",
+        file=sys.stderr,
+    )
+    # At K=3, background_rank=3, the empirical Type-I rate at nominal alpha=0.05
+    # is approximately 2x nominal (rank-3 is the lowest of three conditions and
+    # the order-statistic gap is at its widest there). Filtering at q <= 0.05
+    # gives users roughly the FDR they'd get from q <= 0.10 — worth a warning,
+    # not just a quiet stderr line.
+    if K == 3 and result.background_rank == 3 and expected_t1 > 0.05:
+        warnings.warn(
+            f"at K=3 with default --background-rank=3, the empirical Type-I "
+            f"rate at nominal alpha=0.05 is ~{expected_t1:.3f}, roughly 2x "
+            "nominal. The q-values you'd typically filter at (e.g. 0.05) "
+            "correspond to a higher effective FDR. To get more conservative "
+            "calibration at K=3, either pass `--background-rank 2` (compares "
+            "against the runner-up; uniformly conservative across K) or "
+            "tighten `--q-threshold` (e.g. to 0.025).",
+            FertilizerEnrichmentWarning, stacklevel=2,
+        )
     print(
         f"kept {len(out)} / {len(df)} loci "
         f"(q <= {args.q_threshold}"
@@ -778,15 +989,23 @@ def run(args: argparse.Namespace) -> int:
         file=sys.stderr,
     )
 
+    # pandas infers .gz compression from the filename suffix.
     out.to_csv(args.output, sep="\t", index=False)
     return 0
 
 
-def _expected_t1_at_05(K: int) -> float:
+def _expected_t1_at_05(K: int, rank: int) -> float:
     """Rough effective Type-I rate at nominal alpha=0.05 under the Poisson
-    null, derived from the simulations documented in the README. Used only
-    for the conservativeness diagnostic in CLI stderr output."""
-    table = {2: 0.05, 3: 0.008, 4: 0.003, 5: 0.001, 6: 0.0005, 7: 0.0003, 8: 0.0002}
+    null, derived from simulation. Used only for the conservativeness
+    diagnostic in CLI stderr output. Two tables: one for rank=2 (uniformly
+    conservative); one for rank>=3 (approximately nominal at K=3 — where
+    the rank-3 condition is the lowest of three and the order-statistic
+    gap is at its widest — and increasingly conservative as K grows). For
+    rank > 3 the rank=3 table is used as a (slightly pessimistic)
+    approximation; the qualitative story is the same."""
+    pair_table = {2: 0.05, 3: 0.008, 4: 0.003, 5: 0.001, 6: 0.0005, 7: 0.0003, 8: 0.0002}
+    default = {2: 0.05, 3: 0.08, 4: 0.015, 5: 0.003, 6: 0.002, 7: 0.001, 8: 0.0005}
+    table = pair_table if rank == 2 else default
     if K in table:
         return table[K]
     return table[8] if K > 8 else table[2]
