@@ -50,7 +50,7 @@ positive at this FDR. A K = 3 calibration warning is also printed; see
 ```bash
 # 1. region-by-track matrix of summed signal
 fertilizer extract -w liver.bw heart.bw brain.bw kidney.bw \
-	-b background.bed -o signals.tsv -s sum -j 8
+	-b background.bed -o signals.tsv -s sum -j 8 2> extract.log
 
 # 2. per-region enrichment test; stderr carries the diagnostics
 fertilizer enrich -i signals.tsv -c liver heart brain kidney \

@@ -16,7 +16,7 @@ fertilizer enrich -i signals.tsv -c liver heart brain kidney \
 | `--fit-type` | `common` | `common`: one α for all regions. `parametric`: α(μ) = a/μ + b. `zero`: Poisson, diagnostic only, anti-conservative |
 | `--min-signal` | `5.0` | regions with mean normalized signal below this are left out of dispersion fitting (still tested) |
 | `--dispersion` | fitted | fixed α for every region; bypasses `--fit-type` and `--min-signal` |
-| `--size-factors` | median-of-ratios | one positive value per `-c` entry, same order. `1 1 1 ...` disables normalization |
+| `--size-factors` | median-of-ratios | one positive value per `-c` entry, same order; fertilizer divides by them. Rescale to geometric mean 1 (`references/recipes.md` §8). `1 1 1 ...` disables normalization |
 | `--pseudocount` | `0.5` | effect-size log2 only; the test ignores it. Must be > 0 |
 | `--allow-non-sum` | off | skip the `stat=sum` header check. Leave it off |
 
@@ -47,9 +47,10 @@ kept 11 / 200 loci (q <= 0.05)
 | `override` | `--dispersion` given |
 | `zero` | `--fit-type zero` |
 
-`alpha(mu) = 0/mu + 0` under `common` means the Poisson fallback fired: fewer
-than 10 regions passed `--min-signal`. A warning says so. See
-`references/troubleshooting.md`.
+`alpha(mu) = 0/mu + 0` under `common` has two causes: the Poisson fallback
+(fewer than 10 regions passed `--min-signal`; a warning says so), or a median
+per-region estimate ≤ 0, meaning no more variance than Poisson (seen with
+scaled-down tracks; no warning). See `references/troubleshooting.md`.
 
 **The `conservativeness` line is only reliable for ranks 2 and 3.** It reads a
 built-in table with rows for rank 2 and rank 3 only, and uses the rank-3 row
@@ -77,11 +78,12 @@ Rows keep input order: sort by `q_value` yourself.
 
 **`lrt_zero_dominated` rows sort to the top once sorted by `q_value`.** The
 background is the rank-r value, so it is zero when all but the top r − 1
-tracks read zero: two zeros at K = 4, rank 3; eighteen at K = 20. Such a
-region (unmappable, or on a chromosome several bigWigs lack) gets a tiny
-p-value against the zero. A row where every track is zero also carries the
-flag, with `p_value = 1`. When many rows
-carry the flag, check chr naming and the extract warnings before anything else.
+tracks read zero: one at rank = K (so a single broken track at K = 3 flags
+and calls every region it zeroes), two at K = 4, rank 3. Such a region
+(unmappable, or on a chromosome some bigWigs lack) gets a tiny p-value against
+the zero. A row where every track is zero also carries the flag, with
+`p_value = 1`. When many rows carry the flag, check chr naming and the extract
+warnings before anything else.
 
 ## Errors (exit code 2, message on stderr)
 

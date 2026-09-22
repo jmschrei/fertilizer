@@ -6,6 +6,7 @@ One bigWig per condition, same assembly, same chromosome naming, same assay,
 **same output type**. Mixing a fold-change track with a p-value or coverage
 track makes the within-region comparison measure the file type, not the
 biology.
+
 `enrich` models each region's summed signal as negative-binomial counts, so the
 sums must behave like counts: non-negative, and variance growing with the mean.
 
@@ -32,7 +33,8 @@ Scaling up inflates the fitted dispersion and costs some power; the null rate
 rises slightly (K = 3, rank 3, Poisson null: 0.086 at ×1, 0.101 at ×200).
 Scaling down so that most regions' mean normalized sum falls below
 `--min-signal` (5.0) breaks dispersion estimation and calls nothing. If typical
-region sums are below ~10, check the track type before anything else:
+region sums are below ~10, check the track type (or, for pseudobulk, the
+cluster size) before anything else:
 
 ```python
 import pandas as pd
@@ -74,17 +76,18 @@ tests. `enrich` warns `N% of adjacent regions overlap ... reported q-values will
 be optimistic` when more than 1% of sorted adjacent pairs overlap. Merge peaks
 (`bedtools merge`) or use a window step equal to the window size.
 
-Regions may differ in length; the test compares conditions within a region, so
-length cancels.
+Regions may differ in length; each test compares conditions within one
+region.
 
 BED details (0-based half-open, columns passed through): `references/extract.md`.
 
 ## Chromosome naming and assembly
 
 BED `chr1` against a bigWig with `1` (Ensembl), or the reverse, gives zeros and
-a warning, not an error. Check the BED and **every** bigWig before extracting;
-one mismatched track among many stays under the 95%-zeros warning and shows up
-only as `lrt_zero_dominated` rows:
+a warning, not an error. Check the BED and **every** bigWig before extracting:
+one mismatched track among many stays under the 95%-zeros warning. At K = 3 it
+then produces a spurious call in every region it zeroes; at larger K it
+produces no flag and no call, so nothing downstream shows it:
 
 ```bash
 cut -f1 background.bed | sort -u | head
@@ -103,8 +106,8 @@ awk 'BEGIN{OFS="\t"} /^(track|browser|#)/{next} $1 ~ /^(KI|GL)/{next} {$1 = ($1=
 ```
 
 A BED on hg19 against an hg38 bigWig gives wrong values everywhere, and the
-`out_of_bounds` warning only where a region runs past a chromosome end. Nothing detects a mismatched
-assembly where coordinates happen to fit; confirm it from the file provenance.
+`out_of_bounds` warning only where a region runs past a chromosome end. Confirm
+the assembly from file provenance.
 
 ## Stranded tracks
 
@@ -122,10 +125,10 @@ df.to_csv("signals_merged.tsv", sep="\t", index=False)
 ```
 
 with `extract ... -n liver_plus liver_minus heart_plus heart_minus`. `+`
-propagates NaN; `DataFrame.sum(axis=1)` silently treats NaN as 0 unless given
-`min_count`. Writing
-through pandas drops the `# fertilizer-extract stat=sum` header; `enrich` then
-skips the stat check, which is correct because sums of sums are still sums.
+propagates NaN; `DataFrame.sum(axis=1)` treats NaN as 0 unless given
+`min_count`. Writing through pandas drops the `# fertilizer-extract stat=sum`
+header; `enrich` then skips the stat check, which is correct because sums of
+sums are still sums.
 
 ## Replicates
 
@@ -142,15 +145,15 @@ for c in ["CTRL", "TRT"]:
 	df = df.drop(columns=reps)
 ```
 
- Never pass replicates as separate
-`-c` conditions: the test would call regions where one replicate is high.
+Never pass replicates as separate `-c` conditions: the test would call regions
+where one replicate is high.
 
 ## A count matrix from another tool
 
 `enrich` reads any tab-separated file with a header row and numeric columns
 named by `-c`. Lines starting with `#` are skipped as comments (anywhere in a
-line, `#` truncates it). A first line containing `stat=<x>` with `x != sum`
-triggers the refusal; any other `#` line is ignored.
+line, `#` truncates it). A first line `# ... stat=<x>` with `x != sum` triggers
+the refusal; any other `#` line is ignored.
 
 | Source | Note |
 |---|---|

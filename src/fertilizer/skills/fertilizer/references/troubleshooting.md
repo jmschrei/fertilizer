@@ -38,17 +38,20 @@ remove it from `-c` or pass `--size-factors`.
 Check in order:
 
 1. **Region sums too small.** Typical sums below ~10, often with
-   `alpha(mu) = 0/mu + 0` on the `dispersion fit` line and a Poisson fallback
-   warning, carry too little evidence to call anything. Check the track type
+   `alpha(mu) = 0/mu + 0` on the `dispersion fit` line, carry too little
+   evidence to call anything. Check the track type or cluster size
    (`references/inputs.md` §Which bigWigs).
 2. **Size factors.** One far from the others, or a `size factors span Nx`
    warning, means the null-majority assumption failed: a pre-filtered region
    set or a global shift (`references/choosing-parameters.md` §Null majority).
-3. **K and rank.** Large K at rank 3 is very conservative; at K = 8 the null
-   rate is ~0 (`references/choosing-parameters.md`).
-4. **Competing peaks.** At rank 2, any second active condition removes the
+3. **External `--size-factors` far from 1.** Their overall scale changes the
+   dispersion fit; rescale to geometric mean 1 (`references/recipes.md` §8).
+4. **K and rank.** At K ≥ 8 the default rank 3 has almost no power; raise it
+   to the highest safe rank and filter with the margin
+   (`references/choosing-parameters.md`).
+5. **Competing peaks.** At rank 2, any second active condition removes the
    call. Raise the rank if shared activity is acceptable.
-5. **No signal.** Plot a few known condition-specific regions from the TSV to
+6. **No signal.** Plot a few known condition-specific regions from the TSV to
    confirm the difference is there.
 
 ## `fewer than 10 loci passed --min-signal=5.0 ... falling back to Poisson (alpha=0)`
@@ -61,12 +64,13 @@ or fix the track scale. `--dispersion A` with an external estimate is the other 
 ## Most top hits have `lrt_zero_dominated = True`
 
 The tested pair contains an exact zero, so the p-value is not from data. Drop
-these rows. The flag needs all but the top r − 1 tracks to be zero, so at small
-K one bad bigWig produces many; at large K they point at sparse or unmappable
-regions, or at several bad tracks. For a single broken track at any K, the
-per-track zero fraction (`references/extract.md` §Coordinates and locus
-problems) is the direct test, and a low `size factors estimated from N / M
-loci` count on stderr is the clue. Where the flagged rows come from:
+these rows. The flag needs all but the top r − 1 tracks to be zero: at rank = K
+(K = 3 at the default) one bad bigWig flags every region it zeroes; otherwise
+the rows point at sparse or unmappable regions, or several bad tracks. A single
+broken track at larger K causes no flag at all; the per-track zero fraction
+(`references/extract.md` §Coordinates and locus problems) finds it at any K,
+and a low `size factors estimated from N / M loci` count on stderr hints at it.
+Where the flagged rows come from:
 
 ```python
 import pandas as pd
@@ -96,8 +100,7 @@ peaks count: `references/choosing-parameters.md` §K = 3.
 
 ## `pyBigWig` fails to build
 
-Install `libcurl4-openssl-dev libssl-dev zlib1g-dev` (Debian/Ubuntu) or
-`brew install curl openssl` (macOS), then reinstall.
+System headers: `references/quickstart.md` §Install.
 
 ## Tracebacks instead of `fertilizer: error:`
 

@@ -37,8 +37,10 @@ PyPI name `fertilizer-genomics`, import name `fertilizer`, CLI `fertilizer`.
   treating calls as real.
 - **`enriched_condition` is always filled in** (argmax), so it is a call only on
   rows that pass the threshold.
-- Ask the user whether a region active in two conditions counts as a hit for
-  either; the answer sets `--background-rank` (`references/choosing-parameters.md`).
+- **Choose `--background-rank` deliberately.** Ask whether a region active in
+  two conditions counts as a hit. At K ≥ 8 the default 3 has almost no power;
+  never go above the highest safe rank (K − 1 up to K = 8, K − 2 beyond), which
+  is anti-conservative (`references/choosing-parameters.md`).
 
 ## Task → reference
 
@@ -58,13 +60,15 @@ PyPI name `fertilizer-genomics`, import name `fertilizer`, CLI `fertilizer`.
 | User asks | Do |
 |---|---|
 | "Which regions are specific to condition X?" | ask whether shared-with-one-other counts; yes → `references/recipes.md` §1, no → §3 |
-| "Top N regions per condition" | `--q-threshold 1.0`, drop flagged rows, group and rank — `references/recipes.md` §2 |
-| "Only regions active in exactly one condition" / "shared by A and B" | rank 3 plus a runner-up filter — `references/recipes.md` §3 |
+| "Top N regions per condition" / "rank every region" / plots | `--q-threshold 1.0`, drop flagged rows, group and rank — `references/recipes.md` §2 |
+| "Just give me a region × bigWig signal matrix" | `extract` alone — `references/extract.md` |
+| "Only in X" / "shared by A and B" | highest safe rank plus a runner-up margin — `references/recipes.md` §3 |
 | "Higher in A than B" | K = 2 run on just A and B — `references/recipes.md` §4 |
 | "Lower in X than everywhere else" | intersect K = 2 runs — `references/recipes.md` §5 |
 | "How robust are these calls?" | `--dispersion` sweep — `references/recipes.md` §6 |
 | "Starting regions for ledidi / regulatory design" | `references/recipes.md` §7 |
-| "I have 10+ conditions" | `references/choosing-parameters.md` §Many conditions |
+| "I have 8+ conditions" / pseudobulk bigWigs per single-cell cluster | `references/choosing-parameters.md` §Many conditions |
+| "My normalization / spike-in factors" | `--size-factors` — `references/recipes.md` §8 |
 
 ## Symptom → reference
 

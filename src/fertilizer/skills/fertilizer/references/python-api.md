@@ -1,6 +1,6 @@
 # Python API
 
-Nothing is exported from `fertilizer` itself; import from the submodules.
+The top-level package exports only `__version__`; import from the submodules.
 
 ## Run the CLI from Python
 
@@ -45,12 +45,17 @@ enrichment_analysis(
 
 Returns every region. It does **not** apply `--q-threshold`, check the
 `stat=sum` header, check for overlapping regions, or print the stderr
-diagnostics; those live in the CLI wrapper. The K = 3 calibration warning is
-issued by the CLI too (as a `FertilizerEnrichmentWarning`). Report instead:
-`res.size_factors`, `res.n_loci_for_size_factors`, `res.dispersion_fit`,
-`res.dispersion_trend`, `res.background_rank`, and the number of rows passing
-your threshold. Check overlap yourself: `bedtools merge -i regions.bed | wc -l`
-below the region count means some regions overlap.
+diagnostics; those live in the CLI wrapper, as does the K = 3 calibration
+warning. Report instead: `res.size_factors`, `res.n_loci_for_size_factors`,
+`res.dispersion_fit`, `res.dispersion_trend`, `res.background_rank`, and the
+number of rows passing your threshold. The CLI's overlap check, which warns
+above 1%:
+
+```python
+r = df.sort_values(["chrom", "start", "end"])
+same = r["chrom"].to_numpy()[1:] == r["chrom"].to_numpy()[:-1]
+print("overlapping adjacent pairs:", (same & (r["start"].to_numpy()[1:] < r["end"].to_numpy()[:-1])).mean())
+```
 
 | `EnrichmentResult` field | Shape / type |
 |---|---|
@@ -116,5 +121,4 @@ for w in caught:
 
 Both are `UserWarning` subclasses. `FertilizerWarning` comes from extract
 (locus problems, >95% zeros); `FertilizerEnrichmentWarning` from enrich (size
-factor spread, Poisson fallback, `fit_type="zero"`, non-convergence; region
-overlap and the K = 3 calibration warning come from the CLI only).
+factor spread, Poisson fallback, `fit_type="zero"`, non-convergence).
