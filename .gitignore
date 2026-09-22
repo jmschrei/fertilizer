@@ -21,3 +21,7 @@ examples/*.bw
 examples/regions.bed
 examples/signals.tsv
 examples/enrichment.tsv
+
+# Local agent instructions and notes
+CLAUDE.md
+claude_comments/
