@@ -21,6 +21,7 @@ offset. 10x fragment files are already shifted.
 from __future__ import annotations
 
 import contextlib
+import gzip
 import io
 import os
 import struct
@@ -41,6 +42,7 @@ __all__ = [
     "count_bam",
     "count_fragments",
     "contig_ranges",
+    "contig_weights",
     "count_issues",
     "fragment_ranges",
     "input_stem",
@@ -441,17 +443,56 @@ def bam_has_index(path: str) -> bool:
 		return bam.has_index()
 
 
+def contig_weights(path: str) -> dict[str, float] | None:
+	"""How much data each contig of an indexed BAM or CRAM holds, from its
+	index: mapped reads for a BAM index, compressed slice bytes for a CRAM
+	index (.crai records no read counts). None when neither is available."""
+	path = str(path)
+	if path.endswith(".cram"):
+		crai = next((c for c in (path + ".crai", path[:-5] + ".crai") if os.path.exists(c)), None)
+		if crai is None:
+			return None
+		with _reading(path) as bam:
+			names = bam.references
+		weights: dict[str, float] = {}
+		with gzip.open(crai, "rt") as fh:
+			for line in fh:
+				fields = line.split()
+				if len(fields) >= 6 and int(fields[0]) >= 0:
+					name = names[int(fields[0])]
+					weights[name] = weights.get(name, 0.0) + int(fields[5])
+		return weights or None
+	try:
+		with _reading(path) as bam:
+			weights = {s.contig: float(s.mapped) for s in bam.get_index_statistics()}
+	except (ValueError, AttributeError):
+		return None
+	return weights if sum(weights.values()) > 0 else None
+
+
 def contig_ranges(
-    lengths: dict[str, int], n_ranges: int,
+    lengths: dict[str, int], n_ranges: int, weights: dict[str, float] | None = None,
 ) -> list[tuple[str, int | None, int | None]]:
-	"""Split chromosomes into about `n_ranges` pieces of similar length, as
-	`(contig, start, stop)` for `count_bam`. A chromosome shorter than one
-	piece is returned whole, as `(contig, None, None)`."""
-	total = sum(lengths.values())
-	step = max(1, -(-total // max(n_ranges, 1)))
+	"""Split chromosomes into about `n_ranges` pieces, as `(contig, start,
+	stop)` for `count_bam`; a chromosome left whole is `(contig, None, None)`.
+
+	With `weights` (see `contig_weights`), each chromosome gets pieces in
+	proportion to its share of the data, and chromosomes the index shows to
+	hold no reads are omitted (they would count nothing). Otherwise pieces
+	have similar length. Within a chromosome, pieces are equal in length.
+	"""
+	n_ranges = max(n_ranges, 1)
+	total_weight = sum(weights.get(c, 0.0) for c in lengths) if weights else 0.0
+	if total_weight > 0:
+		counts = {c: max(1, round(n_ranges * weights.get(c, 0.0) / total_weight)) for c in lengths}
+	else:
+		step = max(1, -(-sum(lengths.values()) // n_ranges))
+		counts = {c: max(1, -(-length // step)) for c, length in lengths.items()}
 	ranges: list[tuple[str, int | None, int | None]] = []
 	for contig, length in lengths.items():
-		pieces = max(1, -(-length // step))
+		if total_weight > 0 and weights.get(contig, 0.0) <= 0:
+			continue
+		pieces = min(counts[contig], max(length, 1))
 		if pieces == 1:
 			ranges.append((contig, None, None))
 			continue

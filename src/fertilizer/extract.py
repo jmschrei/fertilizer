@@ -479,15 +479,17 @@ def _extract_counts(
 	skip_flags = sum(bit for name, bit in counting.FLAG_BITS.items() if name not in included)
 	lengths = [counting.bam_chrom_lengths(path) for path in paths]
 	# An indexed file is split into chromosome pieces, about four per worker
-	# so that dense and sparse pieces balance out. Each piece task gets the
-	# regions of its chromosome only.
+	# so that dense and sparse pieces balance out, sized by how many reads the
+	# index says each chromosome holds. Each piece task gets the regions of
+	# its chromosome only.
 	by_chrom = pd.DataFrame({"chrom": chroms}).groupby("chrom", sort=False).indices
 	pieces_per_file = max(1, 4 * effective_n_jobs // len(paths))
 	tasks = []
 	for i, path in enumerate(paths):
 		if counting.bam_has_index(path):
 			present = {c: lengths[i][c] for c in by_chrom if c in lengths[i]}
-			for contig, lo, hi in counting.contig_ranges(present, pieces_per_file):
+			weights = counting.contig_weights(path)
+			for contig, lo, hi in counting.contig_ranges(present, pieces_per_file, weights):
 				tasks.append((i, contig, lo, hi, by_chrom[contig]))
 		else:
 			tasks.append((i, None, None, None, None))

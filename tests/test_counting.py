@@ -22,6 +22,7 @@ from fertilizer.counting import (
     bam_chrom_lengths,
     bam_has_index,
     contig_ranges,
+    contig_weights,
     count_bam,
     count_fragments,
     count_issues,
@@ -820,3 +821,45 @@ class TestContigPieces:
 		assert main(["extract", "-a", str(path), "-b", str(bed), "-o", str(out), "-j", n_jobs,
 		             "-ps", "4", "-ns", "-5"]) == 0
 		np.testing.assert_array_equal(_read_output(out)[1]["S"], _bam_reference_counts(reads, regions, 4, -5))
+
+
+class TestContigWeights:
+	@pytest.fixture
+	def reads(self):
+		# chr1 only, so chr2 holds no reads.
+		return [r for r in _random_reads(np.random.default_rng(40), n=400) if r[0] == 0]
+
+	def test_bam_weights_are_mapped_reads(self, tmp_path, reads):
+		path = _write_alignments(tmp_path / "a.bam", reads)
+		weights = contig_weights(str(path))
+		assert weights["chr1"] == sum(1 for r in reads if not r[3] & 0x4)
+		assert weights.get("chr2", 0) == 0
+
+	def test_cram_weights_from_crai(self, tmp_path, reads):
+		ref = _write_reference(tmp_path / "ref.fa")
+		path = _write_alignments(tmp_path / "a.cram", reads, reference=ref)
+		weights = contig_weights(str(path))
+		assert weights["chr1"] > 0 and weights.get("chr2", 0) == 0
+
+	def test_unindexed_has_no_weights(self, tmp_path, reads):
+		assert contig_weights(str(_write_alignments(tmp_path / "a.bam", reads, index=False))) is None
+
+	def test_weighted_ranges_follow_the_data_and_skip_empty_contigs(self):
+		lengths = {"chr1": 5000, "chr2": 3000, "chr3": 1000}
+		ranges = contig_ranges(lengths, 12, {"chr1": 10.0, "chr2": 0.0, "chr3": 2.0})
+		assert sum(1 for c, *_ in ranges if c == "chr1") == 10
+		assert sum(1 for c, *_ in ranges if c == "chr3") == 2
+		assert not any(c == "chr2" for c, *_ in ranges)
+
+	@pytest.mark.parametrize("fmt", ["bam", "cram"])
+	@pytest.mark.parametrize("n_jobs", ["1", "4"])
+	def test_cli_with_empty_contig(self, tmp_path, reads, fmt, n_jobs):
+		"""Regions on a contig with no reads are skipped by the task plan and
+		must still be reported as 0."""
+		ref = _write_reference(tmp_path / "ref.fa") if fmt == "cram" else None
+		path = _write_alignments(tmp_path / f"S.{fmt}", reads, reference=ref)
+		regions = _random_regions(np.random.default_rng(41))
+		bed = _write_bed(tmp_path / "r.bed", regions)
+		out = tmp_path / "out.tsv"
+		assert main(["extract", "-a", str(path), "-b", str(bed), "-o", str(out), "-j", n_jobs]) == 0
+		np.testing.assert_array_equal(_read_output(out)[1]["S"], _bam_reference_counts(reads, regions))
