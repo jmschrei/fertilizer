@@ -11,6 +11,7 @@ import pytest
 
 from fertilizer.cli import build_parser
 from fertilizer.extract import (
+    STAT_CHOICES,
     FertilizerWarning,
     _chunk_slices,
     bigwig_region_means,
@@ -703,3 +704,63 @@ class TestStat:
         out = tmp_path / "out.tsv"
         with pytest.raises(SystemExit):
             _make_args([dense_bw], [bed], out, stat="median")
+
+
+class TestZoomLevels:
+    """bigWigs written with zoom levels (the default for every writer) must
+    give the same per-region statistics as the full-resolution data. The
+    small fixtures above never trigger a zoom level, so this builds a track
+    large enough that pyBigWig would otherwise answer from one."""
+
+    CHROM_LEN = 200_000
+    WIDTHS = (200, 500, 2_000, 10_000, 50_000)
+
+    @pytest.fixture(params=["single_base", "runs_of_50", "sparse_runs"])
+    def zoomed_bw(self, request, tmp_path):
+        """Return (path, per-base values with NaN where uncovered)."""
+        rng = np.random.default_rng(0)
+        n = self.CHROM_LEN
+        path = tmp_path / f"{request.param}.bw"
+        bw = pyBigWig.open(str(path), "w")
+        bw.addHeader([("chr1", n)])
+        if request.param == "single_base":
+            per_base = rng.poisson(5, n).astype(np.float64)
+            bw.addEntries("chr1", 0, values=per_base.tolist(), span=1, step=1)
+        else:
+            starts = np.arange(0, n, 50)
+            run_vals = rng.poisson(5, len(starts)).astype(np.float64)
+            if request.param == "sparse_runs":
+                keep = rng.random(len(starts)) < 0.3
+                starts, run_vals = starts[keep], run_vals[keep]
+            bw.addEntries(["chr1"] * len(starts), starts.tolist(),
+                          ends=(starts + 50).tolist(), values=run_vals.tolist())
+            per_base = np.full(n, np.nan)
+            for s, v in zip(starts, run_vals, strict=True):
+                per_base[s:s + 50] = v
+        bw.close()
+        return path, per_base
+
+    @pytest.mark.parametrize("stat", STAT_CHOICES)
+    def test_matches_full_resolution(self, zoomed_bw, stat):
+        path, per_base = zoomed_bw
+        starts = [123_457] * len(self.WIDTHS)
+        ends = [s + w for s, w in zip(starts, self.WIDTHS, strict=True)]
+        regions = pd.DataFrame({"chrom": ["chr1"] * len(starts),
+                                "start": starts, "end": ends})
+
+        expected = []
+        for s, e in zip(starts, ends, strict=True):
+            v = per_base[s:e]
+            covered = v[~np.isnan(v)]
+            if stat == "coverage":
+                expected.append(covered.size / v.size)
+            elif covered.size == 0:
+                expected.append(0.0)
+            elif stat == "std":
+                expected.append(covered.std(ddof=1))
+            else:
+                expected.append(getattr(np, stat)(covered))
+
+        vals, issues = bigwig_region_means(regions, str(path), stat=stat)
+        np.testing.assert_allclose(vals, expected, rtol=1e-5)
+        assert issues == set()

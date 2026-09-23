@@ -176,7 +176,10 @@ def _means_for_slice(
         if end > length:
             issues.setdefault("out_of_bounds", chrom)
             continue
-        value = bw.stats(chrom, start, end, type=stat, nBins=1)[0]
+        # exact=True reads the full-resolution data. The default answers from
+        # zoom levels when one is coarse enough, and pyBigWig's zoom-level
+        # `sum` is wrong by orders of magnitude (the others are approximate).
+        value = bw.stats(chrom, start, end, type=stat, nBins=1, exact=True)[0]
         if value is not None and not np.isnan(value):
             means[i] = value
     return means, issues
