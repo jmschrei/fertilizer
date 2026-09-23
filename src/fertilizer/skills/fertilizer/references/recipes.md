@@ -1,6 +1,6 @@
 # Recipes: user question → commands
 
-Every recipe assumes `signals.tsv` from `extract -s sum` and a background-matched
+Every recipe assumes `signals.tsv` from `extract -s sum` (or counts from `extract -a`/`-f`) and a background-matched
 region set (`references/inputs.md`). The examples have K = 4, where the default
 `--background-rank 3` is also the highest safe rank. At K ≥ 5 pick the rank
 from `references/choosing-parameters.md` first. Load results with:

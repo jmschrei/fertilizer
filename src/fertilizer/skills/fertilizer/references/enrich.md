@@ -18,7 +18,7 @@ fertilizer enrich -i signals.tsv -c liver heart brain kidney \
 | `--dispersion` | fitted | fixed α ≥ 0 for every region (0 is Poisson); bypasses `--fit-type` and `--min-signal` |
 | `--size-factors` | median-of-ratios | one positive value per `-c` entry, same order; fertilizer divides by them. Rescale to geometric mean 1 (`references/recipes.md` §8). `1 1 1 ...` disables normalization |
 | `--pseudocount` | `0.5` | effect-size log2 only; the test ignores it. Must be > 0 |
-| `--allow-non-sum` | off | skip the `stat=sum` header check. Leave it off |
+| `--allow-non-sum` | off | skip the header check (`stat=sum` from bigWigs or `stat=count` from BAM/fragments pass). Leave it off |
 
 Keep the defaults unless one of `references/choosing-parameters.md`'s cases
 applies. Pick `--background-rank` deliberately; it defines the question.
@@ -95,3 +95,6 @@ warnings before anything else.
 | `--size-factors has 2 values but --conditions has 3` | one value per `-c` entry |
 | `--background-rank must be >= 2` | rank 1 is the top condition itself |
 | `--pseudocount must be > 0` | |
+| `counts must be finite; found N NaN or infinite value(s)` | blank cells in the `-c` columns; fill or drop them |
+| `--dispersion must be finite and >= 0` | 0 is Poisson |
+| `condition column(s) ['p_value'] share a name with an output column` | rename that input column |

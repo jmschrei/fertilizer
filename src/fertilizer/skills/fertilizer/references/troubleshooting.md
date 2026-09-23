@@ -6,8 +6,8 @@
 fertilizer: error: input was produced by `fertilizer extract --stat mean`, which aggregates bigWig signal in a way that is NOT count-like; ...
 ```
 
-`extract` defaults to `-s mean`. Re-run it with `-s sum`. Do not pass
-`--allow-non-sum`.
+`extract` defaults to `-s mean`. Re-run it with `-s sum`, or count the BAM or
+fragment files with `-a`/`-f` if you have them. Do not pass `--allow-non-sum`.
 
 ## `extract` output is (nearly) all zeros
 
@@ -15,8 +15,8 @@ Warnings: `N% of region-by-bigWig cells are exactly zero`, often with
 `chromosome '1' (and possibly others) referenced in BED but missing from bigWig`.
 `extract` still exits 0 and writes the file. Causes, most likely first:
 
-1. Chromosome naming: BED `1` vs bigWig `chr1`, or the reverse. The warning
-   lists the bigWig's names. Rename the BED with the `awk` in
+1. Chromosome naming: BED `1` vs bigWig/BAM/fragment `chr1`, or the reverse.
+   The warning lists the file's names. Rename the BED with the `awk` in
    `references/inputs.md` §Chromosome naming (a bare `sed 's/^/chr/'` also
    prefixes `track` lines and turns `MT` into `chrMT`).
 2. Wrong or empty bigWig.
@@ -25,6 +25,27 @@ Warnings: `N% of region-by-bigWig cells are exactly zero`, often with
 Commands to compare names: `references/inputs.md` §Chromosome naming. The
 per-track zero fraction: `references/extract.md` §Coordinates and locus
 problems.
+
+## extract errors for BAM, CRAM and fragment input
+
+| Message | Fix |
+|---|---|
+| `--min-mapq, --include-flagged do(es) not apply to --fragments input` (or `--groups ... --bams`, shifts with `--bigwigs`) | the flag belongs to another input kind: shifts to `-a`/`-f`, MAPQ and flags to `-a`, groups to `-f` |
+| `--stat applies to bigWig input only` | drop `-s`; BAM and fragment input is always counted |
+| `--names cannot be combined with --groups` | with `-g` the columns are the group names |
+| `--groups table ... has no column(s) ['group']` | name the columns with `--barcode-column` and `--group-column`; the message lists the table's columns |
+| `--groups table ... assigns N barcode(s) to more than one group` | each barcode may be in one group |
+| `could not open BAM/SAM/CRAM ...` | not an alignment file, or truncated (missing EOF marker) |
+| `could not read ...: ... For a CRAM, htslib may need the reference FASTA` | a corrupt file, or a CRAM that needs its reference: set `REF_PATH` to the FASTA's location |
+
+Mixing `-w`, `-a` and `-f` in one run is an argparse error; extract each input
+kind separately.
+
+## `counts must be finite; found N NaN or infinite value(s)`
+
+`enrich` found blank cells (read as NaN) or infinite values in the `-c` columns.
+`extract` never writes them; a hand-edited or merged TSV does. Fill or drop
+those rows.
 
 ## `at least 2 loci with positive signal in every sample are required to compute size factors`
 

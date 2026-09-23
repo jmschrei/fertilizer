@@ -78,6 +78,8 @@ PyPI name `fertilizer-genomics`, import name `fertilizer`, CLI `fertilizer`.
 | If you hit… | Read |
 |---|---|
 | `input was produced by \`fertilizer extract --stat mean\`` | `references/troubleshooting.md` — re-run with `-s sum` |
+| `... do(es) not apply to --bams input`, `--stat applies to bigWig input only`, `--groups table ...`, `could not open BAM/SAM/CRAM`, `could not read ... REF_PATH` | `references/troubleshooting.md` §extract errors |
+| `counts must be finite; found N NaN or infinite value(s)` | `references/troubleshooting.md` — empty cells in the input TSV |
 | `N% of region-by-bigWig (or -column) cells are exactly zero` / `chromosome '1' ... missing from bigWig` (or BAM, fragment file) | `references/troubleshooting.md` — chr naming or assembly |
 | `at least 2 loci with positive signal in every sample are required` | `references/troubleshooting.md` |
 | `q_value` near 1 everywhere, or zero rows kept | `references/troubleshooting.md` |

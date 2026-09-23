@@ -103,6 +103,8 @@ cut -f1 background.bed | sort -u | head
 for bw in *.bw; do
 	python -c "import sys, pyBigWig; print(sys.argv[1], list(pyBigWig.open(sys.argv[1]).chroms())[:5])" "$bw"
 done
+samtools view -H sample.bam | grep '^@SQ' | head -3          # BAM or CRAM
+zcat fragments.tsv.gz | grep -v '^#' | cut -f1 | uniq | head   # fragment file
 ```
 
 Ensembl → UCSC names for a BED (`MT` → `chrM`; skips `track`/`browser`/`#`
@@ -161,14 +163,14 @@ where one replicate is high.
 
 `enrich` reads any tab-separated file with a header row and numeric columns
 named by `-c`. Lines starting with `#` are skipped as comments (anywhere in a
-line, `#` truncates it). A first line `# ... stat=<x>` with `x != sum` triggers
-the refusal; any other `#` line is ignored.
+line, `#` truncates it). A first line `# ... stat=<x>` with `x` other than
+`sum` or `count` triggers the refusal; any other `#` line is ignored.
 
 | Source | Note |
 |---|---|
 | featureCounts | works; its `# Program:featureCounts` line is skipped. Pass the sample columns to `-c` |
 | deepTools `multiBigwigSummary BED-file --outRawCounts` | do not use. Its values are per-base means, not sums, and its header line starts with `#'chr'`, so it is skipped and the first data row becomes the header. Run `fertilizer extract -s sum` on the same bigWigs instead |
-| hand-built TSV | blanks become NaN, which `enrich` does not reject: that region silently gets `p_value = 1`. Fill or drop NaN first |
+| hand-built TSV | blanks become NaN, and `enrich` exits with `counts must be finite; found N NaN or infinite value(s)`. Fill or drop them first |
 
 Coordinate columns must be named `chrom`, `start`, `end` for the overlap check
 to run; other names are passed through untouched.
