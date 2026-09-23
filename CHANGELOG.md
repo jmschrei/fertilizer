@@ -52,6 +52,9 @@ project adheres to semantic versioning (the API is unstable until 1.0).
   any bigWig with zoom levels (pyBigWig writes them by default; check
   `pyBigWig.open(path).header()["nLevels"]`). `mean`, `min`, `coverage` and
   `std` were approximate. Re-run `extract` on output made with 0.1.0.
+- `extract` no longer caches open bigWig handles across calls. A bigWig
+  rewritten at the same path in the same process (for example, from a notebook)
+  was read from the stale handle and returned the old values.
 - `cli.main` catches `ValueError` / `FileNotFoundError` and emits
   `fertilizer: error: <msg>` to stderr with exit code 2, instead of
   surfacing a Python traceback for user-input errors.

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import gzip
-import threading
 import warnings
 from collections import Counter
 from pathlib import Path
@@ -30,23 +29,17 @@ __all__ = [
     "run_extract",
 ]
 
-_thread_local_bw = threading.local()
 
+def _open_bw(path: str):
+    """Open `path` with pyBigWig. The caller closes the handle.
 
-def _get_bw(path: str):
-    """Return a thread-local pyBigWig handle for `path`, opening once per worker."""
-    cache = getattr(_thread_local_bw, "cache", None)
-    if cache is None:
-        cache = {}
-        _thread_local_bw.cache = cache
-    handle = cache.get(path)
-    if handle is None:
-        try:
-            handle = pyBigWig.open(path)
-        except RuntimeError as e:
-            raise ValueError(f"could not open bigWig {path!r}: {e}") from e
-        cache[path] = handle
-    return handle
+    Handles are not cached across calls: a cached handle keeps reading the old
+    file after the path is rewritten, and each slice opens its bigWig once.
+    """
+    try:
+        return pyBigWig.open(path)
+    except RuntimeError as e:
+        raise ValueError(f"could not open bigWig {path!r}: {e}") from e
 
 
 class FertilizerWarning(UserWarning):
@@ -157,7 +150,17 @@ def _means_for_slice(
     corresponding output value is left as 0.0. Uncovered but otherwise valid
     regions also yield 0.0 but are not reported.
     """
-    bw = _get_bw(bigwig_path)
+    bw = _open_bw(bigwig_path)
+    try:
+        return _stats_for_slice(bw, chroms, starts, ends, stat)
+    finally:
+        bw.close()
+
+
+def _stats_for_slice(
+    bw, chroms: np.ndarray, starts: np.ndarray, ends: np.ndarray, stat: str,
+) -> tuple[np.ndarray, dict[str, str]]:
+    """Body of `_means_for_slice` on an already-open pyBigWig handle."""
     issues: dict[str, str] = {}
     chrom_lengths = bw.chroms()
     n = len(chroms)
@@ -326,7 +329,9 @@ def run_extract(args: argparse.Namespace) -> int:
         if not issues:
             continue
         try:
-            chroms_in_bw = list(_get_bw(bw_path).chroms().keys())
+            bw = _open_bw(bw_path)
+            chroms_in_bw = list(bw.chroms().keys())
+            bw.close()
         except Exception:
             chroms_in_bw = []
         for key in sorted(issues):
