@@ -58,6 +58,34 @@ project adheres to semantic versioning (the API is unstable until 1.0).
 - CLI: example invocations in subparser epilogs; clean error+exit-2 on
   user-input errors instead of raw Python tracebacks.
 
+### Changed (breaking)
+
+- `fertilizer diff` is replaced by `fertilizer enrich`, and
+  `fertilizer.diff.differential_analysis` by
+  `fertilizer.enrichment.enrichment_analysis`. The old names were removed,
+  not aliased, so 0.1.0 commands and imports fail. The question the test
+  asks also changed. 0.1.0 asked whether any condition differs from the
+  others, so a locus where one condition was depleted was reported alongside
+  one where a condition was enriched. `enrich` asks whether the top condition
+  is enriched over the condition at `--background-rank` (default 3), which is
+  the question for picking condition-specific regions. Calls from the two
+  versions are not interchangeable.
+- `effect_size` is now the log2 ratio of the enriched condition to the mean of
+  the other conditions, and is always non-negative. In 0.1.0 it was the
+  largest absolute log2 difference between any condition and the per-locus
+  grand mean, so a locus with one depleted condition had a large effect size.
+- The output column `max_condition` is renamed `enriched_condition`. In the
+  Python API, `DiffResult` is renamed `EnrichmentResult` and
+  `FertilizerDiffWarning` is renamed `FertilizerEnrichmentWarning`.
+- `extract` output starts with a `# fertilizer-extract stat=<value>` line.
+  Code that reads the TSV directly needs `comment="#"` (pandas) or must skip
+  the line.
+- `enrich` refuses input made with `extract --stat mean` (still `extract`'s
+  default) or any other non-`sum` statistic unless `--allow-non-sum` is
+  passed. 0.1.0 accepted any column, but the NB likelihood assumes counts, so
+  p-values on means were not calibrated. Re-run `extract -s sum`, or count
+  BAM/fragment input.
+
 ### Changed
 
 - `enrich` reports `p_value = 1` and `lrt_convergence_failed = True` for
