@@ -15,7 +15,7 @@ fertilizer enrich -i signals.tsv -c liver heart brain kidney \
 | `--background-rank` | `3` | rank of the condition the top one is tested against; capped to K. See `references/choosing-parameters.md` |
 | `--fit-type` | `common` | `common`: one α for all regions. `parametric`: α(μ) = a/μ + b. `zero`: Poisson, diagnostic only, anti-conservative |
 | `--min-signal` | `5.0` | regions with mean normalized signal below this are left out of dispersion fitting (still tested) |
-| `--dispersion` | fitted | fixed α for every region; bypasses `--fit-type` and `--min-signal` |
+| `--dispersion` | fitted | fixed α ≥ 0 for every region (0 is Poisson); bypasses `--fit-type` and `--min-signal` |
 | `--size-factors` | median-of-ratios | one positive value per `-c` entry, same order; fertilizer divides by them. Rescale to geometric mean 1 (`references/recipes.md` §8). `1 1 1 ...` disables normalization |
 | `--pseudocount` | `0.5` | effect-size log2 only; the test ignores it. Must be > 0 |
 | `--allow-non-sum` | off | skip the `stat=sum` header check. Leave it off |

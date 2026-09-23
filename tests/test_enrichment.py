@@ -483,6 +483,12 @@ class TestEnrichmentAnalysis:
         assert res_poisson.p_value[0] < res_nb.p_value[0]
         assert not np.allclose(res_poisson.p_value, res_nb.p_value)
 
+    @pytest.mark.parametrize("bad", [-0.5, np.nan, np.inf])
+    def test_dispersion_override_rejects_invalid(self, bad):
+        counts = np.random.default_rng(5).poisson(100, size=(50, 3)).astype(float)
+        with pytest.raises(ValueError, match="dispersion_override"):
+            enrichment_analysis(counts, dispersion_override=bad)
+
     def test_fit_type_zero_forces_poisson(self):
         rng = np.random.default_rng(6)
         counts = rng.poisson(100, size=(500, 4)).astype(float)
@@ -934,6 +940,18 @@ class TestEnrichmentCLI:
         df = pd.read_csv(out, sep="\t")
         assert len(df) == n
 
+
+    def test_negative_dispersion_flag_rejected(self, tmp_path, capsys):
+        inp = tmp_path / "in.tsv"
+        out = tmp_path / "out.tsv"
+        cols = {c: np.full(20, 50.0) for c in "ABC"}
+        self._write_input(inp, chrom=["chr1"] * 20, start=np.arange(20),
+                          end=np.arange(20) + 1, **cols)
+        assert main(self._enrich_argv(
+            inp, list("ABC"), out, ["--dispersion", "-0.1"],
+        )) == 2
+        assert "--dispersion" in capsys.readouterr().err
+        assert not out.exists()
 
 class TestExtractStatGuard:
     """`enrich` should refuse inputs produced by `extract --stat <non-sum>`
