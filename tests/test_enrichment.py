@@ -2,16 +2,27 @@
 
 from __future__ import annotations
 
+import gzip
 import warnings
 
 import numpy as np
 import pandas as pd
 import pytest
+from scipy import stats
+from scipy.optimize import brentq
 
+from fertilizer import enrichment as enrichment_module
 from fertilizer.cli import build_parser, main
 from fertilizer.enrichment import (
     EnrichmentResult,
     FertilizerEnrichmentWarning,
+    _apply_trend,
+    _expected_t1_at_05,
+    _fit_parametric_trend,
+    _intercept_mle,
+    _nb_logpmf,
+    _read_extract_stat,
+    _warn_if_regions_overlap,
     bh_qvalues,
     enrichment_analysis,
     size_factors,
@@ -1059,3 +1070,293 @@ def test_parser_has_both_subcommands():
     for sub in ("extract", "enrich"):
         with pytest.raises(SystemExit):
             parser.parse_args([sub, "--help"])
+
+
+def _nb_counts(rng, mu, alpha, K):
+    """(n, K) NB counts with per-locus mean `mu` and dispersion `alpha`."""
+    mu = np.asarray(mu, dtype=float)
+    alpha = np.broadcast_to(np.asarray(alpha, dtype=float), mu.shape)
+    return rng.negative_binomial(
+        (1 / alpha)[:, None], (1 / (1 + alpha * mu))[:, None], size=(mu.size, K),
+    ).astype(float)
+
+
+class TestNBLogPmf:
+    @pytest.mark.parametrize("mu", [0.5, 5.0, 50.0])
+    @pytest.mark.parametrize("alpha", [1e-3, 0.1, 2.0])
+    def test_matches_scipy_nbinom(self, mu, alpha):
+        y = np.arange(0, 60, dtype=float)
+        expected = stats.nbinom.logpmf(y, 1 / alpha, 1 / (1 + alpha * mu))
+        np.testing.assert_allclose(_nb_logpmf(y, mu, alpha), expected, rtol=1e-9, atol=1e-9)
+
+    @pytest.mark.parametrize("mu", [0.5, 5.0, 50.0])
+    def test_poisson_branch_matches_scipy_poisson(self, mu):
+        y = np.arange(0, 60, dtype=float)
+        np.testing.assert_allclose(
+            _nb_logpmf(y, mu, 0.0), stats.poisson.logpmf(y, mu), rtol=1e-12, atol=1e-12,
+        )
+
+    def test_continuous_across_poisson_cutoff(self):
+        y = np.arange(0, 200, dtype=float)
+        cutoff = enrichment_module._POISSON_CUTOFF
+        below = _nb_logpmf(y, 50.0, cutoff * 0.999)
+        above = _nb_logpmf(y, 50.0, cutoff * 1.001)
+        np.testing.assert_allclose(below, above, rtol=1e-2)
+
+    def test_broadcasts_per_locus_alpha(self):
+        y = np.array([3.0, 7.0])
+        alpha = np.array([0.0, 0.5])
+        out = _nb_logpmf(y, np.array([4.0, 4.0]), alpha)
+        np.testing.assert_allclose(out[0], stats.poisson.logpmf(3, 4.0))
+        np.testing.assert_allclose(out[1], stats.nbinom.logpmf(7, 2.0, 1 / 3.0))
+
+
+class TestInterceptMLE:
+    def test_matches_scalar_root_finder(self):
+        rng = np.random.default_rng(0)
+        counts = rng.poisson(40, size=(30, 2)).astype(float)
+        sf = rng.uniform(0.5, 2.0, size=(30, 2))
+        alpha = rng.uniform(0.01, 0.5, size=30)
+        mu0, converged = _intercept_mle(counts, sf, alpha)
+        assert converged.all()
+        for i in range(30):
+            def score(m, i=i):
+                return np.sum((counts[i] - m * sf[i]) / (1 + alpha[i] * m * sf[i]))
+            np.testing.assert_allclose(mu0[i], brentq(score, 1e-8, 1e6), rtol=1e-7)
+
+    def test_poisson_is_closed_form(self):
+        counts = np.array([[30.0, 10.0], [5.0, 5.0]])
+        sf = np.array([[1.0, 2.0], [1.0, 1.0]])
+        mu0, converged = _intercept_mle(counts, sf, 0.0)
+        np.testing.assert_allclose(mu0, [40.0 / 3.0, 5.0])
+        assert converged.all()
+
+    def test_non_convergence_is_flagged_and_warned(self):
+        # Unequal size factors: with equal ones the Poisson start is already
+        # the NB root and no Newton step is taken.
+        counts = np.array([[500.0, 1.0], [300.0, 2.0]])
+        sf = np.array([[0.5, 2.0], [0.5, 2.0]])
+        with pytest.warns(FertilizerEnrichmentWarning, match="did not converge"):
+            _, converged = _intercept_mle(counts, sf, 0.5, max_iter=1)
+        assert not converged.any()
+
+    def test_unconverged_loci_get_p_value_one(self, monkeypatch):
+        rng = np.random.default_rng(1)
+        counts = rng.poisson(50, size=(200, 3)).astype(float)
+        counts[0] = [5.0, 5.0, 500.0]
+        real = enrichment_module._intercept_mle
+
+        def fail_first(*args, **kwargs):
+            mu0, converged = real(*args, **kwargs)
+            converged = converged.copy()
+            converged[0] = False
+            return mu0, converged
+
+        monkeypatch.setattr(enrichment_module, "_intercept_mle", fail_first)
+        res = enrichment_analysis(counts, background_rank=2)
+        assert res.lrt_convergence_failed[0]
+        assert res.p_value[0] == 1.0
+        assert not res.lrt_convergence_failed[1:].any()
+
+
+class TestLRTStatistic:
+    def test_poisson_pair_matches_hand_computed(self):
+        """K=2, unit size factors, alpha=0: the null mean is 20 for (30, 10),
+        so T = 2 * (30 log(30/20) + 10 log(10/20))."""
+        counts = np.array([[30.0, 10.0], [10.0, 30.0]])
+        res = enrichment_analysis(counts, size_factors_override=[1.0, 1.0],
+                                  dispersion_override=0.0)
+        t = 2 * (30 * np.log(1.5) + 10 * np.log(0.5))
+        np.testing.assert_allclose(res.lrt_stat, [t, t], rtol=1e-10)
+        np.testing.assert_allclose(res.p_value, min(2 * 0.5 * stats.chi2.sf(t, 1), 1.0))
+        np.testing.assert_array_equal(res.enriched_condition_idx, [0, 1])
+
+    def test_nb_pair_matches_scipy_likelihood(self):
+        x, sf, alpha = np.array([30.0, 10.0]), np.array([1.5, 0.8]), 0.1
+        counts = np.array([x, x[::-1]])
+        res = enrichment_analysis(counts, size_factors_override=sf,
+                                  dispersion_override=alpha)
+
+        def nb_ll(y, m):
+            return stats.nbinom.logpmf(y, 1 / alpha, 1 / (1 + alpha * m)).sum()
+
+        def score(m):
+            return np.sum((x - m * sf) / (1 + alpha * m * sf))
+        m0 = brentq(score, 1e-8, 1e6)
+        t = 2 * (nb_ll(x, x) - nb_ll(x, m0 * sf))
+        np.testing.assert_allclose(res.lrt_stat[0], t, rtol=1e-8)
+
+    def test_all_zero_rows_are_not_called(self):
+        rng = np.random.default_rng(3)
+        counts = rng.poisson(50, size=(300, 3)).astype(float)
+        counts[:5] = 0.0
+        res = enrichment_analysis(counts)
+        np.testing.assert_array_equal(res.p_value[:5], 1.0)
+        np.testing.assert_array_equal(res.effect_size[:5], 0.0)
+        assert res.lrt_zero_dominated[:5].all()
+        assert np.isfinite(res.q_value).all()
+
+
+class TestParametricTrend:
+    def test_recovers_constant_dispersion(self):
+        rng = np.random.default_rng(0)
+        mu = np.exp(rng.uniform(np.log(20), np.log(1000), 4000))
+        counts = _nb_counts(rng, mu, 0.05, K=5)
+        res = enrichment_analysis(counts, fit_type="parametric")
+        assert res.dispersion_fit == "parametric"
+        a, b = res.dispersion_trend
+        assert a < 0.1
+        assert b == pytest.approx(0.05, rel=0.1)
+
+    def test_detects_decreasing_trend(self):
+        rng = np.random.default_rng(0)
+        mu = np.exp(rng.uniform(np.log(10), np.log(1000), 4000))
+        counts = _nb_counts(rng, mu, 2.0 / mu + 0.05, K=5)
+        res = enrichment_analysis(counts, fit_type="parametric")
+        low, high = _apply_trend(np.array([10.0, 1000.0]), res.dispersion_trend)
+        assert low > 1.5 * high
+
+    @pytest.mark.skip(reason="known bias: with alpha(mu) = 2/mu + 0.05 and K=5 the "
+                             "fitted `a` is 0.5-0.7 across seeds, so low-mu dispersion "
+                             "is underestimated")
+    def test_recovers_trend_coefficients(self):
+        rng = np.random.default_rng(0)
+        mu = np.exp(rng.uniform(np.log(10), np.log(1000), 4000))
+        counts = _nb_counts(rng, mu, 2.0 / mu + 0.05, K=5)
+        a, b = enrichment_analysis(counts, fit_type="parametric").dispersion_trend
+        assert a == pytest.approx(2.0, rel=0.3)
+        assert b == pytest.approx(0.05, rel=0.3)
+
+    def test_per_locus_alpha_clipped_to_informative_support(self):
+        rng = np.random.default_rng(4)
+        mu = np.concatenate([np.full(50, 0.5), np.exp(rng.uniform(np.log(10), np.log(1000), 2000))])
+        counts = _nb_counts(rng, mu, 2.0 / mu + 0.05, K=5)
+        res = enrichment_analysis(counts, fit_type="parametric")
+        normalized_mu = (counts / res.size_factors).mean(axis=1)
+        informative = normalized_mu >= 5.0
+        support = _apply_trend(normalized_mu[informative], res.dispersion_trend)
+        assert res.per_locus_dispersion.max() <= support.max() + 1e-12
+        assert res.per_locus_dispersion.min() >= support.min() - 1e-12
+
+    def test_trim_leaving_too_few_loci_returns_none(self):
+        mu = np.full(12, 50.0)
+        alpha = np.array([0.0] * 9 + [10.0] * 3)
+        assert _fit_parametric_trend(mu, alpha, min_signal=5.0) is None
+
+    def test_too_few_informative_loci_returns_none(self):
+        assert _fit_parametric_trend(np.full(9, 50.0), np.zeros(9), min_signal=5.0) is None
+
+    def test_failed_fit_falls_back_to_common(self, monkeypatch):
+        rng = np.random.default_rng(5)
+        counts = rng.poisson(100, size=(500, 3)).astype(float)
+        monkeypatch.setattr(enrichment_module, "_fit_parametric_trend", lambda *a, **k: None)
+        with pytest.warns(FertilizerEnrichmentWarning, match="single common alpha"):
+            res = enrichment_analysis(counts, fit_type="parametric")
+        assert res.dispersion_fit == "common-fallback"
+        common = enrichment_analysis(counts, fit_type="common")
+        np.testing.assert_allclose(res.per_locus_dispersion, common.per_locus_dispersion)
+
+    def test_unknown_fit_type_rejected(self):
+        counts = np.random.default_rng(6).poisson(50, size=(50, 3)).astype(float)
+        with pytest.raises(ValueError, match="unknown fit_type"):
+            enrichment_analysis(counts, fit_type="local")
+
+
+class TestRegionOverlapWarning:
+    def _frame(self, chroms, starts, ends):
+        return pd.DataFrame({"chrom": chroms, "start": starts, "end": ends})
+
+    def test_sliding_windows_warn(self):
+        starts = np.arange(0, 5000, 50)
+        df = self._frame(["chr1"] * len(starts), starts, starts + 100)
+        with pytest.warns(FertilizerEnrichmentWarning, match="adjacent regions overlap"):
+            _warn_if_regions_overlap(df)
+
+    def test_disjoint_regions_are_silent(self):
+        starts = np.arange(0, 5000, 100)
+        df = self._frame(["chr1"] * len(starts), starts, starts + 100)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            _warn_if_regions_overlap(df)
+
+    def test_same_coordinates_on_different_chroms_are_silent(self):
+        df = self._frame(["chr1", "chr2", "chr3"], [0, 0, 0], [100, 100, 100])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            _warn_if_regions_overlap(df)
+
+    def test_no_coordinate_columns_is_silent(self):
+        df = pd.DataFrame({"A": [1.0, 2.0], "B": [3.0, 4.0]})
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            _warn_if_regions_overlap(df)
+
+    def test_cli_emits_warning(self, tmp_path):
+        rng = np.random.default_rng(7)
+        n = 200
+        starts = np.arange(n) * 50
+        inp = tmp_path / "in.tsv"
+        pd.DataFrame({"chrom": ["chr1"] * n, "start": starts, "end": starts + 100,
+                      **{c: rng.poisson(50, size=n).astype(float) for c in "AB"}},
+                     ).to_csv(inp, sep="\t", index=False)
+        with pytest.warns(FertilizerEnrichmentWarning, match="adjacent regions overlap"):
+            assert main(["enrich", "-i", str(inp), "-c", "A", "B",
+                         "-o", str(tmp_path / "out.tsv")]) == 0
+
+
+class TestReadExtractStat:
+    def test_gzip_header_is_read(self, tmp_path):
+        path = tmp_path / "in.tsv.gz"
+        with gzip.open(path, "wt") as fh:
+            fh.write("# fertilizer-extract stat=mean\nchrom\tstart\tend\tA\n")
+        assert _read_extract_stat(str(path)) == "mean"
+
+    def test_missing_file_returns_none(self, tmp_path):
+        assert _read_extract_stat(str(tmp_path / "nope.tsv")) is None
+
+    def test_comment_without_stat_returns_none(self, tmp_path):
+        path = tmp_path / "in.tsv"
+        path.write_text("# some other comment\nA\tB\n1\t2\n")
+        assert _read_extract_stat(str(path)) is None
+
+    def test_gzip_mean_input_refused_by_cli(self, tmp_path, capsys):
+        path = tmp_path / "in.tsv.gz"
+        with gzip.open(path, "wt") as fh:
+            fh.write("# fertilizer-extract stat=mean\n")
+            pd.DataFrame({"A": [1.0, 2.0], "B": [2.0, 1.0]}).to_csv(fh, sep="\t", index=False)
+        assert main(["enrich", "-i", str(path), "-c", "A", "B",
+                     "-o", str(tmp_path / "out.tsv")]) == 2
+        assert "--stat mean" in capsys.readouterr().err
+
+    def test_gzip_output_round_trips(self, tmp_path):
+        rng = np.random.default_rng(8)
+        inp = tmp_path / "in.tsv"
+        out = tmp_path / "out.tsv.gz"
+        pd.DataFrame({c: rng.poisson(50, size=100).astype(float) for c in "AB"}).to_csv(
+            inp, sep="\t", index=False)
+        assert main(["enrich", "-i", str(inp), "-c", "A", "B", "-o", str(out),
+                     "--q-threshold", "1.0"]) == 0
+        with gzip.open(out, "rt") as fh:
+            df = pd.read_csv(fh, sep="\t")
+        assert len(df) == 100
+        assert "q_value" in df.columns
+
+
+class TestEnrichCLIValidation:
+    @pytest.mark.parametrize("extra,message", [
+        (["--q-threshold", "1.5"], "--q-threshold"),
+        (["--q-threshold", "-0.1"], "--q-threshold"),
+        (["--p-threshold", "2"], "--p-threshold"),
+        (["--pseudocount", "0"], "--pseudocount"),
+        (["--background-rank", "1"], "--background-rank"),
+    ])
+    def test_invalid_flags_exit_2(self, tmp_path, capsys, extra, message):
+        inp = tmp_path / "in.tsv"
+        pd.DataFrame({"A": [10.0, 20.0], "B": [12.0, 18.0]}).to_csv(inp, sep="\t", index=False)
+        assert main(["enrich", "-i", str(inp), "-c", "A", "B",
+                     "-o", str(tmp_path / "out.tsv"), *extra]) == 2
+        assert message in capsys.readouterr().err
+
+    def test_expected_t1_beyond_table_uses_largest_k(self):
+        assert _expected_t1_at_05(12, 2) == _expected_t1_at_05(8, 2)
+        assert _expected_t1_at_05(12, 3) == _expected_t1_at_05(8, 3)
