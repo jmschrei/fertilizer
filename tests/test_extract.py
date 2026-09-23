@@ -139,7 +139,7 @@ class TestLoadRegions:
         path = tmp_path / "a.bed"
         _write_bed(path, [("1", 0, 100), ("2", 0, 100), ("X", 0, 100)])
         df = load_regions([str(path)])
-        assert df["chrom"].dtype == object
+        assert pd.api.types.is_string_dtype(df["chrom"])
         assert df["chrom"].tolist() == ["1", "2", "X"]
 
     def test_comment_lines_skipped(self, tmp_path):
