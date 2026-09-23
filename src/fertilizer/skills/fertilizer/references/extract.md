@@ -35,7 +35,10 @@ chr1	127	327	4000.0	5400.0	5200.0
   `bed_col_6`, `bed_col_7`, ... (0-based index). narrowPeak `signalValue` is
   therefore `bed_col_6`. Give every BED the same number of columns, or the
   short ones get NaN in the extra columns.
-- Values are never NaN. Uncovered bases contribute 0.
+- Values are never NaN. A region with no coverage gives 0. In a partly covered
+  region, uncovered bases are skipped, not counted as 0: `mean`, `min`, `max`
+  and `std` describe the covered bases only, `sum` adds only covered bases,
+  and `coverage` is the covered fraction.
 - fertilizer 0.1.0 read statistics from bigWig zoom levels, which made `-s sum`
   wrong by orders of magnitude for regions of a few hundred bp or more whenever
   the bigWig has zoom levels (`header()["nLevels"] > 0`). Re-run `extract` on

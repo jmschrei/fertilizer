@@ -106,12 +106,14 @@ Compute a per-region summary statistic (mean by default; `-s` chooses among `mea
 | --- | --- |
 | `-w`, `--bigwigs` | one or more bigWig signal tracks |
 | `-b`, `--beds` | one or more BED region files. Columns 1-3 are required (`chrom`/`start`/`end`); columns 4-6 are passed through as `name`/`score`/`strand`; any further columns are passed through as `bed_col_<i>` (BED12 and narrowPeak disagree on the meaning of columns 7+, so generic names are used to avoid mislabeling). `#` comment lines are skipped, as are UCSC `track` and `browser` lines at the top of a file. |
-| `-o`, `--output` | path to the output TSV |
+| `-o`, `--output` | path to the output TSV; gzip-compressed when the name ends in `.gz` (the metadata header is kept, and `enrich` reads it from the compressed file) |
 | `-s`, `--stat` | per-region summary statistic: `mean` (default), `max`, `min`, `sum`, `std`, `coverage`. Maps to pyBigWig's `stats(type=..., exact=True)`, so values come from the full-resolution data rather than the bigWig's zoom levels. **Use `sum` if the output will be passed to `fertilizer enrich`** — the NB-GLM assumes count-like input. `extract` writes a `# fertilizer-extract stat=...` header line so `enrich` can verify this. |
 | `-n`, `--names` | optional explicit column names, one per `--bigwigs` entry. Overrides the default of using each bigWig's filename stem. Useful when two paths share a basename (e.g. `RNAseq/A.bw` and `ATACseq/A.bw`). A name that matches a BED column present in the input (`chrom`, `start`, `end`, `name`, `score`, `strand`, `bed_col_<i>`) is rejected. |
-| `-j`, `--n-jobs` | parallel workers (default `-1`, all cores) |
+| `-j`, `--n-jobs` | parallel worker threads (default `-1`, one per core). On a shared machine set this explicitly; the work is split into one chunk per worker per bigWig |
 
 **Coordinates are 0-based half-open**, matching the standard BED/UCSC bigWig convention. A region `chr1 100 200` covers bases 100..199 inclusive (length 100). If your input is a 1-based file (UCSC table dumps, some BED-like exports), subtract 1 from `start` before running `extract`.
+
+**Partially covered regions.** bigWigs do not store uncovered bases, and every statistic except `coverage` is computed over the covered bases only. For a 200 bp region with 50 bp at 5.0, 50 bp at 1.0 and 100 bp uncovered, `mean` is 3.0 (not 1.5), `min` is 1.0 (not 0.0), `max` is 5.0, `std` is the sample standard deviation of the 100 covered values, `sum` is 300 (uncovered bases add nothing), and `coverage` is 0.5. If your bigWig writes zeros explicitly, those bases are covered and do count. Use `sum` or `coverage` when the uncovered fraction matters.
 
 Zeros never mean "missing" — the output is always numeric, never `NaN`. A region whose summary statistic genuinely resolves to zero (empty bigWig, uncovered span) is reported as `0.0` silently. A region with a locus-level problem (unknown chromosome, coordinates past the end of the chromosome, zero-length interval, negative start) is also reported as `0.0` but triggers a single `FertilizerWarning` — one warning per distinct issue type per run, regardless of how many rows or bigWigs were affected.
 
@@ -153,6 +155,8 @@ Columns appended to the output:
 | `lrt_zero_dominated` | `True` when `X_{k*} == 0` or `X_{k_bg} == 0`, i.e. the LRT pair contains a zero. The reported p-value for these loci is driven by the internal `mu_alt` floor (1e-20) rather than by data, and they tend to dominate the top of sparse-data output as spurious hits. Treat with skepticism — common causes are regions of poor mappability or chromosome-naming mismatches in some tracks. |
 | `lrt_convergence_failed` | `True` when the intercept-only NB MLE for the null fit did not converge for that locus. Its `p_value` has been set to 1.0; the column is present so users can audit how many loci hit this case. |
 
+The LRT statistic `T` and the per-locus dispersion `α` are not written to the TSV. They are available as `lrt_stat` and `per_locus_dispersion` on the `EnrichmentResult` returned by `enrichment_analysis` (see [Python API](#python-api)).
+
 Size factors, the number of loci that contributed to the size-factor estimate, the estimated dispersion fit, its trend coefficients, the test's effective conservativeness at the current K, and the number of kept/total loci are printed to stderr. The dispersion-fit label is one of:
 
 | label | meaning |
@@ -169,9 +173,9 @@ Size-factor spread, Poisson fallbacks, `--fit-type zero`, and `common-fallback` 
 
 | CLI flag | effect |
 | --- | --- |
-| `-i`, `--input` | input TSV |
+| `-i`, `--input` | input TSV; read as gzip when the name ends in `.gz` |
 | `-c`, `--conditions` | two or more column names to compare. Names that match an output column (`effect_size`, `p_value`, `q_value`, `enriched_condition`, or one of the three flag columns) are rejected |
-| `-o`, `--output` | output TSV, filtered to loci passing the threshold, with extra columns appended |
+| `-o`, `--output` | output TSV, filtered to loci passing the threshold, with extra columns appended; gzip-compressed when the name ends in `.gz` |
 | `--q-threshold` | keep loci with q ≤ this (default `0.05`; set to `1.0` to keep all rows) |
 | `--p-threshold` | additionally keep only loci with raw p ≤ this (default: off) |
 | `--fit-type` | dispersion model: `common` (default, median of MoM estimates, bias-corrected), `parametric` (fits `α(μ) = a/μ + b`), or `zero` (forces Poisson — diagnostic only, strictly anti-conservative if real overdispersion exists) |
@@ -249,7 +253,24 @@ res: EnrichmentResult = enrichment_analysis(counts, fit_type="common")
 #   res.dispersion_trend (tuple[float, float]), res.background_rank (int)
 ```
 
-`FertilizerWarning` (locus-level issues from `extract`) and `FertilizerEnrichmentWarning` (size-factor spread, Poisson fallbacks from `enrich`) are both `UserWarning` subclasses — catch them with `warnings.catch_warnings()` or filter them with `warnings.simplefilter(..., FertilizerWarning)`.
+`FertilizerWarning` (locus-level issues from `extract`) and `FertilizerEnrichmentWarning` (size-factor spread, Poisson and `common-fallback` fallbacks, `--fit-type zero`, the K = 3 calibration note, region overlap and MLE non-convergence from `enrich`) are both `UserWarning` subclasses and are unrelated to each other, so filtering one does not filter the other. From the CLI they are printed to stderr. In Python:
+
+```python
+import warnings
+from fertilizer.extract import FertilizerWarning
+from fertilizer.enrichment import FertilizerEnrichmentWarning, enrichment_analysis
+
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always", FertilizerWarning)
+    warnings.simplefilter("always", FertilizerEnrichmentWarning)
+    res = enrichment_analysis(counts)          # `counts` as in the example above
+for w in caught:
+    print(w.category.__name__, w.message)
+
+# or silence both (simplefilter takes one category per call)
+warnings.simplefilter("ignore", FertilizerWarning)
+warnings.simplefilter("ignore", FertilizerEnrichmentWarning)
+```
 
 ## Claude Code skill
 

@@ -40,6 +40,10 @@ project adheres to semantic versioning (the API is unstable until 1.0).
   loci whose null-fit NB MLE did not converge (previously: warning only).
 - Top-level CLI description now describes the actual pipeline rather
   than referencing "regulatory design".
+- README documents `.gz` input and output, how each `--stat` treats
+  partially covered regions, that `lrt_stat` and `per_locus_dispersion` are
+  Python-only, the `-j` threading model, and how to catch or silence both
+  warning categories.
 - README reordered so the quickstart demo immediately follows
   installation. Added a "When NOT to use this" section.
 
