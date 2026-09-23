@@ -83,7 +83,7 @@ expect calls to be strong effects.
 At K = 3 the default rank 3 *is* rank K, so every run prints
 
 ```
-FertilizerEnrichmentWarning: at K=3 with default --background-rank=3, the empirical Type-I rate at nominal alpha=0.05 is ~0.080, roughly 2x nominal.
+FertilizerEnrichmentWarning: at K=3 with default --background-rank=3, the empirical Type-I rate at nominal alpha=0.05 is ~0.080, about 1.6x nominal.
 ```
 
 (0.080 comes from a built-in table; the simulation measured 0.085.) Realized

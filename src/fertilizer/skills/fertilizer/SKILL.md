@@ -78,7 +78,7 @@ PyPI name `fertilizer-genomics`, import name `fertilizer`, CLI `fertilizer`.
 | `N% of region-by-bigWig cells are exactly zero` / `chromosome '1' ... missing from bigWig` | `references/troubleshooting.md` — chr naming or assembly |
 | `at least 2 loci with positive signal in every sample are required` | `references/troubleshooting.md` |
 | `q_value` near 1 everywhere, or zero rows kept | `references/troubleshooting.md` |
-| K = 3 warning "roughly 2x nominal" | `references/choosing-parameters.md` §K = 3 |
+| K = 3 warning "about 1.6x nominal" | `references/choosing-parameters.md` §K = 3 |
 | `size factors span Nx` warning | `references/choosing-parameters.md` §Null majority |
 | `fewer than 10 loci passed --min-signal` / Poisson fallback | `references/troubleshooting.md` |
 | `N% of adjacent regions overlap` | `references/inputs.md` §Region set |

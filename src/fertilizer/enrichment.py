@@ -1000,15 +1000,14 @@ def run_enrich(args: argparse.Namespace) -> int:
         file=sys.stderr,
     )
     # At K=3, background_rank=3, the empirical Type-I rate at nominal alpha=0.05
-    # is approximately 2x nominal (rank-3 is the lowest of three conditions and
-    # the order-statistic gap is at its widest there). Filtering at q <= 0.05
-    # gives users roughly the FDR they'd get from q <= 0.10 — worth a warning,
-    # not just a quiet stderr line.
+    # is above nominal (rank 3 is the lowest of three conditions, so the
+    # order-statistic gap between k* and k_bg is at its widest), which is worth
+    # a warning rather than only the stderr line above.
     if K == 3 and result.background_rank == 3 and expected_t1 > 0.05:
         warnings.warn(
             f"at K=3 with default --background-rank=3, the empirical Type-I "
-            f"rate at nominal alpha=0.05 is ~{expected_t1:.3f}, roughly 2x "
-            "nominal. The q-values you'd typically filter at (e.g. 0.05) "
+            f"rate at nominal alpha=0.05 is ~{expected_t1:.3f}, about "
+            f"{expected_t1 / 0.05:.1f}x nominal. The q-values you'd typically filter at (e.g. 0.05) "
             "correspond to a higher effective FDR. To get more conservative "
             "calibration at K=3, either pass `--background-rank 2` (compares "
             "against the runner-up; uniformly conservative across K) or "
@@ -1032,11 +1031,12 @@ def _expected_t1_at_05(K: int, rank: int) -> float:
     """Rough effective Type-I rate at nominal alpha=0.05 under the Poisson
     null, derived from simulation. Used only for the conservativeness
     diagnostic in CLI stderr output. Two tables: one for rank=2 (uniformly
-    conservative); one for rank>=3 (approximately nominal at K=3 — where
-    the rank-3 condition is the lowest of three and the order-statistic
-    gap is at its widest — and increasingly conservative as K grows). For
-    rank > 3 the rank=3 table is used as a (slightly pessimistic)
-    approximation; the qualitative story is the same."""
+    conservative); one for rank>=3 (above nominal at K=3, where the rank-3
+    condition is the lowest of three and the order-statistic gap is at its
+    widest, and increasingly conservative as K grows). For rank > 3 the
+    rank=3 table is used, which understates the rate: at rank = K >= 4 the
+    measured null rate is above nominal (e.g. ~0.11 at K=4, rank=4) while
+    the table gives 0.015."""
     pair_table = {2: 0.05, 3: 0.008, 4: 0.003, 5: 0.001, 6: 0.0005, 7: 0.0003, 8: 0.0002}
     default = {2: 0.05, 3: 0.08, 4: 0.015, 5: 0.003, 6: 0.002, 7: 0.001, 8: 0.0005}
     table = pair_table if rank == 2 else default
