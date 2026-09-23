@@ -40,6 +40,7 @@ __all__ = [
     "bam_has_index",
     "count_bam",
     "count_fragments",
+    "contig_ranges",
     "count_issues",
     "fragment_ranges",
     "input_stem",
@@ -440,6 +441,25 @@ def bam_has_index(path: str) -> bool:
 		return bam.has_index()
 
 
+def contig_ranges(
+    lengths: dict[str, int], n_ranges: int,
+) -> list[tuple[str, int | None, int | None]]:
+	"""Split chromosomes into about `n_ranges` pieces of similar length, as
+	`(contig, start, stop)` for `count_bam`. A chromosome shorter than one
+	piece is returned whole, as `(contig, None, None)`."""
+	total = sum(lengths.values())
+	step = max(1, -(-total // max(n_ranges, 1)))
+	ranges: list[tuple[str, int | None, int | None]] = []
+	for contig, length in lengths.items():
+		pieces = max(1, -(-length // step))
+		if pieces == 1:
+			ranges.append((contig, None, None))
+			continue
+		bounds = [length * k // pieces for k in range(pieces + 1)]
+		ranges += [(contig, a, b) for a, b in zip(bounds[:-1], bounds[1:], strict=True)]
+	return ranges
+
+
 def count_bam(
     path: str,
     chroms: np.ndarray,
@@ -451,12 +471,18 @@ def count_bam(
     skip_flags: int = sum(FLAG_BITS.values()),
     contig: str | None = None,
     batch: int = 1_000_000,
+    start: int | None = None,
+    stop: int | None = None,
 ) -> np.ndarray:
 	"""Count read 5' ends in each region; returns shape (n_regions, 1).
 
 	Reads that are unmapped, have any flag in `skip_flags`, or have mapping
 	quality below `min_mapq` are skipped. With `contig`, only that chromosome
-	is read (requires an index); otherwise the whole file is streamed.
+	is read (requires an index); otherwise the whole file is streamed. With
+	`start` and `stop` as well, only reads whose leftmost aligned base lies in
+	[start, stop) are counted, so the pieces from `contig_ranges` count every
+	read exactly once. Their 5' ends may fall outside the piece, so pass every
+	region on `contig`, not only those inside it.
 	"""
 	counter = RegionCounter(chroms, starts, ends, 1)
 	skip = skip_flags | _UNMAPPED
@@ -466,10 +492,21 @@ def count_bam(
 		buffers: dict[int, list[int]] = {}
 		n_buffered = 0
 		try:
-			reads = bam.fetch(contig) if contig is not None else bam.fetch(until_eof=True)
+			piece = contig is not None and start is not None
+			if piece:
+				reads = bam.fetch(contig, start, stop)
+			elif contig is not None:
+				reads = bam.fetch(contig)
+			else:
+				reads = bam.fetch(until_eof=True)
 			for read in reads:
 				flag = read.flag
 				if flag & skip or read.mapping_quality < min_mapq:
+					continue
+				# fetch(contig, start, stop) also returns reads that begin
+				# before `start` and overlap it; those belong to the piece
+				# where they begin.
+				if piece and not start <= read.reference_start < stop:
 					continue
 				rid = read.reference_id
 				if rid not in wanted:

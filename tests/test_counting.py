@@ -21,6 +21,7 @@ from fertilizer.counting import (
     RegionCounter,
     bam_chrom_lengths,
     bam_has_index,
+    contig_ranges,
     count_bam,
     count_fragments,
     count_issues,
@@ -754,3 +755,68 @@ class TestFragmentRanges:
 		out = tmp_path / "out.tsv"
 		assert main(["extract", "-f", str(path), "-b", str(bed), "-o", str(out), "-n", "x", "-j", n_jobs]) == 0
 		np.testing.assert_array_equal(_read_output(out)[1]["x"], _fragment_reference_counts(rows, regions)[:, 0])
+
+
+class TestContigPieces:
+	@pytest.fixture
+	def reads(self):
+		return _random_reads(np.random.default_rng(30), n=600)
+
+	@pytest.fixture
+	def regions(self):
+		return _random_regions(np.random.default_rng(31))
+
+	@pytest.mark.parametrize("n", [1, 2, 3, 8, 50])
+	def test_contig_ranges_cover_each_chromosome(self, n):
+		lengths = {"chr1": 5000, "chr2": 3000, "chrM": 16}
+		ranges = contig_ranges(lengths, n)
+		for contig, length in lengths.items():
+			pieces = [(a, b) for c, a, b in ranges if c == contig]
+			if pieces == [(None, None)]:
+				continue
+			assert pieces[0][0] == 0 and pieces[-1][1] == length
+			assert all(b == c for (_, b), (c, _) in zip(pieces[:-1], pieces[1:], strict=True))
+			assert all(a < b for a, b in pieces)
+		assert ("chrM", None, None) in ranges or n == 1 or len(ranges) >= n
+
+	@pytest.mark.parametrize("fmt", ["bam", "cram"])
+	@pytest.mark.parametrize("n", [2, 5, 13, 50])
+	@pytest.mark.parametrize("kwargs", [{}, {"pos_shift": 4, "neg_shift": -5},
+	                                    {"pos_shift": -100, "neg_shift": 100, "min_mapq": 0, "skip_flags": 0}])
+	def test_pieces_sum_to_whole_file(self, tmp_path, reads, regions, fmt, n, kwargs):
+		ref = _write_reference(tmp_path / "ref.fa") if fmt == "cram" else None
+		path = _write_alignments(tmp_path / f"a.{fmt}", reads, reference=ref)
+		arrays = _arrays(regions)
+		whole = count_bam(str(path), *arrays, **kwargs)
+		pieced = np.zeros_like(whole)
+		for contig, lo, hi in contig_ranges(dict(REFS), n):
+			pieced += count_bam(str(path), *arrays, contig=contig, start=lo, stop=hi, **kwargs)
+		np.testing.assert_array_equal(pieced, whole)
+
+	def test_cuts_at_read_starts(self, tmp_path, reads, regions):
+		"""Piece boundaries exactly at, just before and just after read starts,
+		including reads with a 100 bp N skip that span several pieces."""
+		path = _write_alignments(tmp_path / "a.bam", reads)
+		arrays = _arrays(regions)
+		whole = count_bam(str(path), *arrays, min_mapq=0, skip_flags=0)
+		starts_chr1 = sorted({s for ref, s, *_ in reads if ref == 0})[::7]
+		for s in starts_chr1:
+			for cut in (s - 1, s, s + 1):
+				if not 0 < cut < REFS[0][1]:
+					continue
+				pieced = (count_bam(str(path), *arrays, min_mapq=0, skip_flags=0, contig="chr1", start=0, stop=cut)
+				          + count_bam(str(path), *arrays, min_mapq=0, skip_flags=0, contig="chr1",
+				                      start=cut, stop=REFS[0][1])
+				          + count_bam(str(path), *arrays, min_mapq=0, skip_flags=0, contig="chr2"))
+				np.testing.assert_array_equal(pieced, whole, err_msg=f"cut at {cut}")
+
+	@pytest.mark.parametrize("n_jobs", ["1", "2", "3", "7"])
+	@pytest.mark.parametrize("fmt", ["bam", "cram"])
+	def test_cli_split_matches_brute_force(self, tmp_path, reads, regions, n_jobs, fmt):
+		ref = _write_reference(tmp_path / "ref.fa") if fmt == "cram" else None
+		path = _write_alignments(tmp_path / f"S.{fmt}", reads, reference=ref)
+		bed = _write_bed(tmp_path / "r.bed", regions)
+		out = tmp_path / "out.tsv"
+		assert main(["extract", "-a", str(path), "-b", str(bed), "-o", str(out), "-j", n_jobs,
+		             "-ps", "4", "-ns", "-5"]) == 0
+		np.testing.assert_array_equal(_read_output(out)[1]["S"], _bam_reference_counts(reads, regions, 4, -5))
