@@ -4,7 +4,7 @@
 
 **Why "fertilizer".** The **Fertile Ground Hypothesis** is that genomes are full of "almost-regulatory" regions — sequences that do not do anything on their own, but can be minimally edited to achieve subtle and precise activity. Many near-motifs, for example, sit one or two substitutions away from binding a transcription factor and recruiting its downstream regulatory activity. `fertilizer` helps identify the fertile ground in a genome that is most useful for your design task by flagging regions where signal in one condition stands out from the others.
 
-> **Status.** v0.1.0 — API is unstable until 1.0. Please report issues. Most
+> **Status.** v0.2.0 — API is unstable until 1.0. Please report issues. Most
 > of this package (including the test suite) was drafted with Claude
 > assistance; the statistical methodology and calibration are exercised by
 > the simulation tests in `tests/test_enrichment.py` and we are continuing
@@ -430,7 +430,7 @@ If you use `fertilizer` in published work, please cite:
 
 > Schreiber, J. *fertilizer: per-region enrichment from single-replicate
 > bigWig signal across conditions.* https://github.com/jmschrei/fertilizer,
-> v0.1.0 (2026).
+> v0.2.0 (2026).
 
 ## License
 
