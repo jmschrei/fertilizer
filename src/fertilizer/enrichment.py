@@ -873,9 +873,22 @@ def _read_extract_stat(path: str) -> str | None:
     return None
 
 
+# Columns `run_enrich` appends to the input table.
+_OUTPUT_COLUMNS = (
+    "effect_size", "p_value", "q_value", "enriched_condition",
+    "effect_size_pc_dominated", "lrt_zero_dominated", "lrt_convergence_failed",
+)
+
+
 def run_enrich(args: argparse.Namespace) -> int:
     if len(args.conditions) < 2:
         raise ValueError("need at least 2 conditions to run enrichment analysis")
+    clash = [c for c in args.conditions if c in _OUTPUT_COLUMNS]
+    if clash:
+        raise ValueError(
+            f"condition column(s) {clash} share a name with an output column "
+            "and would be overwritten in the output; rename them in the input"
+        )
     if not 0.0 <= args.q_threshold <= 1.0:
         raise ValueError(f"--q-threshold must be in [0, 1], got {args.q_threshold}")
     if args.p_threshold is not None and not 0.0 <= args.p_threshold <= 1.0:

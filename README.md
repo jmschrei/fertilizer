@@ -108,7 +108,7 @@ Compute a per-region summary statistic (mean by default; `-s` chooses among `mea
 | `-b`, `--beds` | one or more BED region files. Columns 1-3 are required (`chrom`/`start`/`end`); columns 4-6 are passed through as `name`/`score`/`strand`; any further columns are passed through as `bed_col_<i>` (BED12 and narrowPeak disagree on the meaning of columns 7+, so generic names are used to avoid mislabeling). `#` comment lines are skipped. |
 | `-o`, `--output` | path to the output TSV |
 | `-s`, `--stat` | per-region summary statistic: `mean` (default), `max`, `min`, `sum`, `std`, `coverage`. Maps to pyBigWig's `stats(type=..., exact=True)`, so values come from the full-resolution data rather than the bigWig's zoom levels. **Use `sum` if the output will be passed to `fertilizer enrich`** — the NB-GLM assumes count-like input. `extract` writes a `# fertilizer-extract stat=...` header line so `enrich` can verify this. |
-| `-n`, `--names` | optional explicit column names, one per `--bigwigs` entry. Overrides the default of using each bigWig's filename stem. Useful when two paths share a basename (e.g. `RNAseq/A.bw` and `ATACseq/A.bw`). |
+| `-n`, `--names` | optional explicit column names, one per `--bigwigs` entry. Overrides the default of using each bigWig's filename stem. Useful when two paths share a basename (e.g. `RNAseq/A.bw` and `ATACseq/A.bw`). A name that matches a BED column present in the input (`chrom`, `start`, `end`, `name`, `score`, `strand`, `bed_col_<i>`) is rejected. |
 | `-j`, `--n-jobs` | parallel workers (default `-1`, all cores) |
 
 **Coordinates are 0-based half-open**, matching the standard BED/UCSC bigWig convention. A region `chr1 100 200` covers bases 100..199 inclusive (length 100). If your input is a 1-based file (UCSC table dumps, some BED-like exports), subtract 1 from `start` before running `extract`.
@@ -170,7 +170,7 @@ Size-factor spread, Poisson fallbacks, `--fit-type zero`, and `common-fallback` 
 | CLI flag | effect |
 | --- | --- |
 | `-i`, `--input` | input TSV |
-| `-c`, `--conditions` | two or more column names to compare |
+| `-c`, `--conditions` | two or more column names to compare. Names that match an output column (`effect_size`, `p_value`, `q_value`, `enriched_condition`, or one of the three flag columns) are rejected |
 | `-o`, `--output` | output TSV, filtered to loci passing the threshold, with extra columns appended |
 | `--q-threshold` | keep loci with q ≤ this (default `0.05`; set to `1.0` to keep all rows) |
 | `--p-threshold` | additionally keep only loci with raw p ≤ this (default: off) |
