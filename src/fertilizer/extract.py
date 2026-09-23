@@ -431,8 +431,10 @@ def _extract_counts(
 	"""Counts per region for BAM or fragment input, as an (n_regions,
 	n_columns) array, plus (path, issues, chromosomes in file) per file.
 
-	Fragment files are streamed one task per file. An indexed BAM or CRAM is
-	split into one task per chromosome; an unindexed one, or a SAM, is one task.
+	Fragment files are split into byte ranges (see
+	`counting.fragment_ranges`) so one file can use several workers. An
+	indexed BAM or CRAM is split into one task per chromosome; an unindexed
+	one, or a SAM, is one task.
 	Tasks run in separate processes because pysam iteration holds the GIL.
 	"""
 	n = len(chroms)
@@ -442,18 +444,33 @@ def _extract_counts(
 	file_issues = []
 
 	if kind == "fragments":
-		results = Parallel(n_jobs=max(1, min(effective_n_jobs, len(paths))))(
+		# Split each file into byte ranges so that one large file also uses
+		# every worker; files that cannot be split (plain gzip) or are small
+		# are read as one stream.
+		ranges_per_file = max(1, effective_n_jobs // len(paths))
+		tasks = []
+		for i, path in enumerate(paths):
+			ranges = None
+			if ranges_per_file > 1:
+				ranges = counting.fragment_ranges(path, ranges_per_file)
+			tasks += [(i, r) for r in ranges] if ranges else [(i, None)]
+		results = Parallel(n_jobs=max(1, min(effective_n_jobs, len(tasks))))(
 		    delayed(counting.count_fragments)(
-		        path, chroms, starts, ends, pos_shift, neg_shift, groups,
+		        paths[i], chroms, starts, ends, pos_shift, neg_shift, groups,
+		        byte_range=byte_range,
 		    )
-		    for path in paths
+		    for i, byte_range in tasks
 		)
-		per_file = []
-		for path, (file_counts, observed) in zip(paths, results, strict=True):
-			issues, bad = counting.count_issues(chroms, starts, ends, None, observed)
+		n_columns = 1 if groups is None else len(groups.names)
+		per_file = [np.zeros((n, n_columns), dtype=np.int64) for _ in paths]
+		observed: list[set[str]] = [set() for _ in paths]
+		for (i, _), (task_counts, task_observed) in zip(tasks, results, strict=True):
+			per_file[i] += task_counts
+			observed[i] |= task_observed
+		for path, file_counts, file_observed in zip(paths, per_file, observed, strict=True):
+			issues, bad = counting.count_issues(chroms, starts, ends, None, file_observed)
 			file_counts[bad] = 0
-			per_file.append(file_counts)
-			file_issues.append((path, issues, sorted(observed)))
+			file_issues.append((path, issues, sorted(file_observed)))
 		values = sum(per_file) if groups is not None else np.hstack(per_file)
 		return values, file_issues
 

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import gzip
 import re
+import struct
 import warnings
+import zlib
 
 import numpy as np
 import pandas as pd
@@ -22,6 +24,7 @@ from fertilizer.counting import (
     count_bam,
     count_fragments,
     count_issues,
+    fragment_ranges,
     input_stem,
 )
 from fertilizer.extract import FertilizerWarning
@@ -572,3 +575,182 @@ class TestExtractCLI:
 		out = tmp_path / "o.tsv"
 		assert main(["extract", "-w", str(bw_path), "-b", str(bed), "-o", str(out)]) == 0
 		assert _read_output(out)[0] == "# fertilizer-extract stat=mean\n"
+
+
+##
+
+
+def _bgzf_block(data):
+	"""One BGZF block holding `data` (raw deflate with the BGZF header)."""
+	comp = zlib.compressobj(6, zlib.DEFLATED, -15)
+	deflated = comp.compress(data) + comp.flush()
+	bsize = 18 + len(deflated) + 8 - 1
+	header = b"\x1f\x8b\x08\x04" + b"\x00" * 4 + b"\x00\xff" + struct.pack("<H", 6) + b"BC" \
+	    + struct.pack("<H", 2) + struct.pack("<H", bsize)
+	return header + deflated + struct.pack("<II", zlib.crc32(data), len(data))
+
+
+_BGZF_EOF = _bgzf_block(b"")
+
+
+def _write_bgzf(path, text, cuts):
+	"""Write `text` as BGZF with block boundaries at the text offsets `cuts`;
+	returns the compressed offset where each block starts."""
+	bounds = [0, *sorted(cuts), len(text)]
+	offsets, out = [], b""
+	for a, b in zip(bounds[:-1], bounds[1:], strict=True):
+		offsets.append(len(out))
+		out += _bgzf_block(text[a:b])
+	path.write_bytes(out + _BGZF_EOF)
+	return offsets
+
+
+def _fragment_text(rng, n=40, header=True):
+	rows = _random_fragments(rng, n=n)
+	lines = (["# id=test", "# primary_contig=chr1"] if header else []) + ["\t".join(map(str, r)) for r in rows]
+	return rows, ("\n".join(lines) + "\n").encode()
+
+
+def _split_counts(path, regions, ranges, **kwargs):
+	total, observed = None, set()
+	for r in ranges:
+		counts, obs = count_fragments(str(path), *_arrays(regions), byte_range=r, chunk_bytes=64, **kwargs)
+		total = counts if total is None else total + counts
+		observed |= obs
+	return total, observed
+
+
+class TestFragmentRanges:
+	@pytest.fixture
+	def data(self):
+		rng = np.random.default_rng(20)
+		rows, text = _fragment_text(rng)
+		return rows, text, _random_regions(rng)
+
+	def test_bgzf_block_boundary_at_every_line_edge(self, tmp_path, data):
+		"""Two-block BGZF files cut just before, at and after every newline,
+		plus other offsets: the two ranges together must count every line
+		exactly once."""
+		rows, text, regions = data
+		expected = _fragment_reference_counts(rows, regions)
+		newlines = [i for i, ch in enumerate(text) if ch == ord("\n")]
+		cuts = sorted({c for nl in newlines for c in (nl - 1, nl, nl + 1, nl + 2) if 0 < c < len(text)}
+		              | {1, 2, 5, len(text) - 1})
+		for cut in cuts:
+			path = tmp_path / "f.tsv.gz"
+			offsets = _write_bgzf(path, text, [cut])
+			size = path.stat().st_size
+			counts, observed = _split_counts(path, regions, [(0, offsets[1]), (offsets[1], size)])
+			np.testing.assert_array_equal(counts, expected, err_msg=f"cut at text offset {cut}")
+			assert observed == {"chr1", "chr2"}
+
+	def test_plain_text_split_at_every_byte(self, tmp_path):
+		rng = np.random.default_rng(21)
+		rows, text = _fragment_text(rng, n=12)
+		regions = _random_regions(rng, n=20)
+		path = tmp_path / "f.tsv"
+		path.write_bytes(text)
+		expected = _fragment_reference_counts(rows, regions)
+		for k in range(1, len(text)):
+			counts, _ = _split_counts(path, regions, [(0, k), (k, len(text))])
+			np.testing.assert_array_equal(counts, expected, err_msg=f"split at byte {k}")
+
+	def test_range_without_a_line_start(self, tmp_path, data):
+		"""Blocks 2 and 3 lie inside one line, so their ranges own nothing and
+		the first range finishes the line across them."""
+		rows, text, regions = data
+		first_nl = text.index(b"\n", 40)
+		second_nl = text.index(b"\n", first_nl + 1)
+		line_start = first_nl + 1
+		cuts = [line_start + 3, line_start + 8, second_nl - 2]
+		path = tmp_path / "f.tsv.gz"
+		offsets = _write_bgzf(path, text, cuts)
+		size = path.stat().st_size
+		ranges = list(zip(offsets, [*offsets[1:], size], strict=True))
+		counts, _ = _split_counts(path, regions, ranges)
+		np.testing.assert_array_equal(counts, _fragment_reference_counts(rows, regions))
+		for r in ranges[1:3]:
+			assert count_fragments(str(path), *_arrays(regions), byte_range=r)[0].sum() == 0
+
+	def test_no_trailing_newline(self, tmp_path, data):
+		rows, text, regions = data
+		text = text.rstrip(b"\n")
+		path = tmp_path / "f.tsv.gz"
+		offsets = _write_bgzf(path, text, [len(text) // 3, 2 * len(text) // 3])
+		size = path.stat().st_size
+		counts, _ = _split_counts(path, regions, list(zip(offsets, [*offsets[1:], size], strict=True)))
+		np.testing.assert_array_equal(counts, _fragment_reference_counts(rows, regions))
+
+	@pytest.mark.parametrize("n", [2, 3, 5, 17, 100])
+	def test_fragment_ranges_cover_the_file_at_block_starts(self, tmp_path, data, n):
+		rows, text, regions = data
+		path = tmp_path / "f.tsv.gz"
+		offsets = _write_bgzf(path, text, list(range(37, len(text), 53)))
+		size = path.stat().st_size
+		ranges = fragment_ranges(str(path), n, min_bytes=1)
+		assert ranges[0][0] == 0 and ranges[-1][1] == size
+		assert all(a < b for a, b in ranges)
+		assert all(b == c for (_, b), (c, _) in zip(ranges[:-1], ranges[1:], strict=True))
+		assert {a for a, _ in ranges} <= {*offsets, size - len(_BGZF_EOF)}     # block starts, incl. EOF block
+		assert len(ranges) <= n
+		counts, _ = _split_counts(path, regions, ranges)
+		np.testing.assert_array_equal(counts, _fragment_reference_counts(rows, regions))
+
+	def test_real_bgzip_output_with_groups(self, tmp_path):
+		"""A file compressed by htslib (pysam.tabix_compress) rather than the
+		test writer, counted per barcode group across many ranges."""
+		rng = np.random.default_rng(22)
+		rows = _random_fragments(rng, n=3000)
+		regions = _random_regions(rng)
+		plain = _write_fragments(tmp_path / "f.tsv", rows)
+		path = tmp_path / "f.tsv.gz"
+		pysam.tabix_compress(str(plain), str(path))
+		table = tmp_path / "cells.tsv"
+		table.write_text("barcode\tgroup\nGGG-2\tB\nAAA-1\tA\nTTT-2\tA\n")
+		groups = BarcodeGroups.from_table(str(table))
+		ranges = fragment_ranges(str(path), 8, min_bytes=1)
+		counts, _ = _split_counts(path, regions, ranges, groups=groups)
+		expected = _fragment_reference_counts(rows, regions, group_of={"GGG-2": 0, "AAA-1": 1, "TTT-2": 1},
+		                                      n_groups=2)
+		np.testing.assert_array_equal(counts, expected)
+		stream, _ = count_fragments(str(path), *_arrays(regions), groups=groups)
+		np.testing.assert_array_equal(counts, stream)
+
+	def test_plain_gzip_and_small_files_are_not_split(self, tmp_path, data):
+		_, text, _ = data
+		path = tmp_path / "f.tsv.gz"
+		with gzip.open(path, "wb") as fh:
+			fh.write(text)
+		assert fragment_ranges(str(path), 8, min_bytes=1) is None
+		bgzf = tmp_path / "g.tsv.gz"
+		_write_bgzf(bgzf, text, [100])
+		assert fragment_ranges(str(bgzf), 8) is None            # below the 16 MB default
+		assert fragment_ranges(str(bgzf), 1, min_bytes=1) is None
+
+	def test_corrupt_block_raises_value_error(self, tmp_path, data):
+		_, text, regions = data
+		path = tmp_path / "f.tsv.gz"
+		offsets = _write_bgzf(path, text, [200, 400])
+		raw = bytearray(path.read_bytes())
+		raw[offsets[1] + 20:offsets[1] + 30] = b"\xff" * 10
+		path.write_bytes(bytes(raw))
+		with pytest.raises((ValueError, zlib.error)):
+			count_fragments(str(path), *_arrays(regions), byte_range=(offsets[1], path.stat().st_size))
+
+	@pytest.mark.parametrize("n_jobs", ["1", "2", "3", "7"])
+	def test_cli_splits_one_file_across_workers(self, tmp_path, monkeypatch, n_jobs):
+		import fertilizer.counting as counting_module
+
+		real = counting_module.fragment_ranges
+		monkeypatch.setattr(counting_module, "fragment_ranges",
+		                    lambda path, n, min_bytes=None: real(path, n, min_bytes=1))
+		rng = np.random.default_rng(23)
+		rows = _random_fragments(rng, n=2000)
+		regions = _random_regions(rng)
+		plain = _write_fragments(tmp_path / "f.tsv", rows)
+		path = tmp_path / "f.tsv.gz"
+		pysam.tabix_compress(str(plain), str(path))
+		bed = _write_bed(tmp_path / "r.bed", regions)
+		out = tmp_path / "out.tsv"
+		assert main(["extract", "-f", str(path), "-b", str(bed), "-o", str(out), "-n", "x", "-j", n_jobs]) == 0
+		np.testing.assert_array_equal(_read_output(out)[1]["x"], _fragment_reference_counts(rows, regions)[:, 0])
