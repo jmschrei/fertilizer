@@ -211,7 +211,7 @@ def count_fragments(
     groups: BarcodeGroups | None = None,
     chunksize: int = 2_000_000,
     byte_range: tuple[int, int] | None = None,
-    chunk_bytes: int = 64 << 20,
+    chunk_bytes: int = 16 << 20,
 ) -> tuple[np.ndarray, set[str]]:
 	"""Count fragment ends (Tn5 insertions) in each region.
 
