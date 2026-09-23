@@ -863,3 +863,127 @@ class TestContigWeights:
 		out = tmp_path / "out.tsv"
 		assert main(["extract", "-a", str(path), "-b", str(bed), "-o", str(out), "-j", n_jobs]) == 0
 		np.testing.assert_array_equal(_read_output(out)[1]["S"], _bam_reference_counts(reads, regions))
+
+
+class TestRemainingPaths:
+	"""Paths not reached by the tests above: data on chromosomes without
+	regions, BGZF corruption and buffer boundaries, and small helpers."""
+
+	def test_fragments_on_chromosomes_without_regions(self, tmp_path):
+		rng = np.random.default_rng(50)
+		rows = _random_fragments(rng, n=300)
+		regions = [r for r in _random_regions(rng) if r[0] == "chr1"]
+		path = _write_fragments(tmp_path / "f.tsv", rows)
+		counts, observed = count_fragments(str(path), *_arrays(regions))
+		np.testing.assert_array_equal(counts, _fragment_reference_counts(rows, regions))
+		assert observed == {"chr1", "chr2"}
+
+	def test_reads_on_chromosomes_without_regions(self, tmp_path):
+		rng = np.random.default_rng(51)
+		reads = _random_reads(rng)
+		regions = [r for r in _random_regions(rng) if r[0] == "chr2"]
+		path = _write_alignments(tmp_path / "a.bam", reads, index=False)
+		counts = count_bam(str(path), *_arrays(regions))
+		np.testing.assert_array_equal(counts[:, 0], _bam_reference_counts(reads, regions))
+
+	def test_fragment_ranges_on_uncompressed_file(self, tmp_path):
+		rng = np.random.default_rng(52)
+		rows, text = _fragment_text(rng, n=200)
+		regions = _random_regions(rng)
+		path = tmp_path / "f.tsv"
+		path.write_bytes(text)
+		ranges = fragment_ranges(str(path), 9, min_bytes=1)
+		assert len(ranges) == 9 and ranges[0][0] == 0 and ranges[-1][1] == len(text)
+		counts, _ = _split_counts(path, regions, ranges)
+		np.testing.assert_array_equal(counts, _fragment_reference_counts(rows, regions))
+
+	def test_bgzf_blocks_across_read_buffers(self, tmp_path):
+		"""Blocks that straddle the reader's buffer boundary decode intact."""
+		from fertilizer.counting import _raw_pieces
+
+		_, text = _fragment_text(np.random.default_rng(53), n=60)
+		path = tmp_path / "f.tsv.gz"
+		_write_bgzf(path, text, list(range(50, len(text), 97)))
+		size = path.stat().st_size
+		for read_bytes in (7, 64, 1000):
+			pieces = list(_raw_pieces(str(path), 0, size, read_bytes=read_bytes))
+			assert b"".join(t for _, t in pieces) == text
+
+	def _corrupt(self, tmp_path, edit):
+		_, text = _fragment_text(np.random.default_rng(54), n=60)
+		path = tmp_path / "f.tsv.gz"
+		offsets = _write_bgzf(path, text, [300, 600])
+		raw = bytearray(path.read_bytes())
+		edit(raw, offsets)
+		path.write_bytes(bytes(raw))
+		return path, offsets
+
+	def test_invalid_bgzf_header_mid_file(self, tmp_path):
+		path, offsets = self._corrupt(tmp_path, lambda raw, o: raw.__setitem__(slice(o[1], o[1] + 4), b"XXXX"))
+		with pytest.raises(ValueError, match="invalid BGZF block"):
+			count_fragments(str(path), *_arrays([("chr1", 0, 10)]), byte_range=(0, offsets[1]))
+
+	def test_bgzf_length_mismatch(self, tmp_path):
+		def edit(raw, o):
+			end = o[2] - 4                     # ISIZE field of block 2
+			raw[end:end + 4] = struct.pack("<I", 1)
+		path, offsets = self._corrupt(tmp_path, edit)
+		with pytest.raises(ValueError, match="corrupt BGZF block"):
+			count_fragments(str(path), *_arrays([("chr1", 0, 10)]), byte_range=(offsets[1], offsets[2]))
+
+	def test_truncated_bgzf(self, tmp_path):
+		_, text = _fragment_text(np.random.default_rng(55), n=60)
+		path = tmp_path / "f.tsv.gz"
+		offsets = _write_bgzf(path, text, [300, 600])
+		path.write_bytes(path.read_bytes()[:offsets[2] + 30])      # stop inside block 3
+		with pytest.raises(ValueError, match="truncated BGZF block"):
+			count_fragments(str(path), *_arrays([("chr1", 0, 10)]), byte_range=(offsets[1], offsets[2]))
+
+	def test_sam_has_no_index(self, tmp_path):
+		path = _write_alignments(tmp_path / "a.sam", _random_reads(np.random.default_rng(56), n=20), index=False)
+		assert bam_has_index(str(path)) is False
+
+	def test_cram_without_crai_has_no_weights(self, tmp_path):
+		ref = _write_reference(tmp_path / "ref.fa")
+		reads = _random_reads(np.random.default_rng(57), n=50)
+		path = _write_alignments(tmp_path / "a.cram", reads, index=False, reference=ref)
+		assert contig_weights(str(path)) is None
+
+	def test_reverse_read_without_cigar_raises(self, tmp_path):
+		header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 1000}]}
+		path = tmp_path / "a.bam"
+		with pysam.AlignmentFile(str(path), "wb", header=header) as out:
+			seg = pysam.AlignedSegment()
+			seg.query_name = "r0"
+			seg.flag = 0x10
+			seg.reference_id = 0
+			seg.reference_start = 100
+			seg.mapping_quality = 60
+			seg.query_sequence = "ACGT"
+			out.write(seg)
+		with pytest.raises(ValueError, match="has no CIGAR"):
+			count_bam(str(path), *_arrays([("chr1", 0, 1000)]))
+
+	@pytest.mark.parametrize("n_jobs", ["1", "4"])
+	def test_cli_split_with_groups(self, tmp_path, monkeypatch, n_jobs):
+		"""Byte-range splitting and barcode groups together, through the CLI."""
+		import fertilizer.counting as counting_module
+
+		real = counting_module.fragment_ranges
+		monkeypatch.setattr(counting_module, "fragment_ranges",
+		                    lambda path, n, min_bytes=None: real(path, n, min_bytes=1))
+		rng = np.random.default_rng(58)
+		rows = _random_fragments(rng, n=2000)
+		regions = _random_regions(rng)
+		plain = _write_fragments(tmp_path / "f.tsv", rows)
+		path = tmp_path / "f.tsv.gz"
+		pysam.tabix_compress(str(plain), str(path))
+		table = tmp_path / "cells.tsv"
+		table.write_text("barcode\tcluster\nGGG-2\tB\nAAA-1\tA\nTTT-2\tA\n")
+		bed = _write_bed(tmp_path / "r.bed", regions)
+		out = tmp_path / "out.tsv"
+		assert main(["extract", "-f", str(path), "-g", str(table), "--group-column", "cluster",
+		             "-b", str(bed), "-o", str(out), "-j", n_jobs]) == 0
+		expected = _fragment_reference_counts(rows, regions, group_of={"GGG-2": 0, "AAA-1": 1, "TTT-2": 1},
+		                                      n_groups=2)
+		np.testing.assert_array_equal(_read_output(out)[1][["B", "A"]].to_numpy(), expected)
