@@ -212,6 +212,10 @@ def bigwig_region_means(
     output and are reported via the issue set. Regions that are well-formed but
     simply have no coverage in the bigWig also yield 0.0 but are *not* reported,
     since missing coverage is a property of the data, not of the loci.
+
+    In a partially covered region, every statistic except `coverage` is taken
+    over the covered bases only: uncovered bases do not pull `mean` or `min`
+    toward 0, and add nothing to `sum`. `coverage` is the covered fraction.
     """
     if stat not in STAT_CHOICES:
         raise ValueError(
