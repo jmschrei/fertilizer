@@ -53,7 +53,10 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM"]
-ignore = ["E501"]
+# Indentation is tabs, with spaces after the tabs for alignment under an open
+# bracket; W191 (tab indentation) and E101 (tabs mixed with alignment spaces)
+# would flag every indented line.
+ignore = ["E501", "W191", "E101"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["B011"]
