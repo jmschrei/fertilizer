@@ -21,7 +21,7 @@ Warnings go to stderr; keep them (`2> extract.log`) and read them before
 | `-o`, `--output` | required | output TSV; gzipped when the name ends `.gz` |
 | `-s`, `--stat` | **`mean`** (bigWig only) | `mean`, `max`, `min`, `sum`, `std`, `coverage` (pyBigWig `stats(type=..., exact=True)`). **Use `sum` for `enrich`** |
 | `-n`, `--names` | file names without extension | column names, one per input file, same order |
-| `-j`, `--n-jobs` | `-1` = every core | worker threads. Always set it; on a shared machine take at most half the free cores |
+| `-j`, `--n-jobs` | `-1` = every core | workers: threads for bigWigs, processes for BAM/CRAM/fragments. Always set it; on a shared machine take at most half the free cores |
 
 ## BAM and fragment input
 
@@ -31,14 +31,16 @@ fertilizer extract -f fragments.tsv.gz -g cells.tsv --group-column cluster \
 	-b background.bed -o counts.tsv
 ```
 
-- BAM: counts the 5′ end of each read; each mate counts separately (paired-end
+- BAM/SAM/CRAM: counts the 5′ end of each read; each mate counts separately (paired-end
   ATAC gives both insertions). Skips unmapped, `duplicate`, `secondary`,
   `supplementary` and `qcfail` reads and MAPQ < 30; `--min-mapq` and
   `--include-flagged <names>` change that. An indexed BAM or CRAM is split
   into chromosome pieces across `-j` workers; an unindexed one is one stream.
+  CRAM is read without its reference FASTA.
 - Fragment file: counts both ends (`start`, `end − 1`) of each line once; column
   5 (duplicates) is ignored. Streamed, no index needed; a BGZF or uncompressed
-  file over ~32 MB is split across `-j` workers (plain gzip is not).
+  file over ~32 MB is split across `-j` workers (plain gzip is not). Measured on a
+  3.8 GB file with 70 groups, each worker held ~0.25 GB (~8 GB at `-j 32`).
 - `-ps`/`-ns` are added to the start/end coordinate exactly as in bam2bw.
   `-ps 4 -ns -5` is the Tn5 offset for BAMs; 10x fragments are already shifted,
   so leave both at 0 for them.
@@ -59,8 +61,9 @@ chrom	start	end	A	B	C
 chr1	127	327	4000.0	5400.0	5200.0
 ```
 
-- Line 1 is the metadata header `enrich` reads to enforce `-s sum`. Read the
-  file in pandas with `comment="#"` (or `skiprows=1`).
+- Line 1 is the metadata header `enrich` reads to enforce `-s sum`
+  (`stat=count` from `-a`/`-f` is accepted too). Read the file in pandas with
+  `comment="#"` (or `skiprows=1`).
 - Rows are in input order (concatenated BEDs), not sorted.
 - BED columns 4–6 pass through as `name`, `score`, `strand`; columns 7+ as
   `bed_col_6`, `bed_col_7`, ... (0-based index). narrowPeak `signalValue` is
@@ -78,7 +81,10 @@ chr1	127	327	4000.0	5400.0	5200.0
 ## Column names
 
 The stem of each path: `liver.bw` → `liver`, `ENCFF123ABC.bigWig` →
-`ENCFF123ABC`, `x.+.bw` → `x.+`. Two paths with the same stem are rejected:
+`ENCFF123ABC`, `x.+.bw` → `x.+`. BAM/CRAM/fragment files lose their known
+extensions: `A.bam` → `A`, `C1.fragments.tsv.gz` → `C1.fragments`. With `-g`
+the columns are the group names instead. Two paths with the same stem are
+rejected:
 
 ```
 fertilizer: error: duplicate column names from bigWig filename stems would collide: ['A']
@@ -129,4 +135,4 @@ print("regions positive in every track:", int((df[tracks] > 0).all(axis=1).sum()
 `enrich --allow-non-sum` bypasses the refusal. Do not use it to make the error
 go away; re-run `extract -s sum` instead, which is cheap.
 
-Python equivalent (one bigWig at a time, serial): `references/python-api.md`.
+Python equivalents (serial, one file at a time): `references/python-api.md`.

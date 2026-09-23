@@ -8,7 +8,8 @@ uv pip install git+https://github.com/jmschrei/fertilizer.git
 fertilizer --version
 ```
 
-`pyBigWig` builds against `libcurl`/`libssl`. If the install fails building it:
+`pysam` (BAM/CRAM input) ships wheels for Linux and macOS. `pyBigWig` builds
+against `libcurl`/`libssl`. If the install fails building it:
 `sudo apt-get install libcurl4-openssl-dev libssl-dev zlib1g-dev` (Debian/Ubuntu)
 or `brew install curl openssl` (macOS).
 
@@ -55,6 +56,13 @@ fertilizer extract -w liver.bw heart.bw brain.bw kidney.bw \
 # 2. per-region enrichment test; stderr carries the diagnostics
 fertilizer enrich -i signals.tsv -c liver heart brain kidney \
 	-o enrichment.tsv 2> enrich.log
+```
+
+From BAMs, CRAMs or fragment files, step 1 counts instead of summing (no `-s`):
+
+```bash
+fertilizer extract -a liver.bam heart.bam brain.bam kidney.bam -b background.bed -o signals.tsv -j 8
+fertilizer extract -f fragments.tsv.gz -g cells.tsv --group-column cluster -b background.bed -o signals.tsv -j 8
 ```
 
 `-c` takes the column names `extract` wrote: each bigWig's filename stem

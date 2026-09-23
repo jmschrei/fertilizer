@@ -9,8 +9,8 @@ project adheres to semantic versioning (the API is unstable until 1.0).
 ### Added
 
 - `extract -a` reads CRAM as well as BAM/SAM. Only the fields the counts use
-  are decoded (htslib `required_fields`), so no reference FASTA is needed; an
-  indexed CRAM (`.crai`) is split per chromosome like an indexed BAM.
+  are decoded (htslib `required_fields`), so no reference FASTA is needed. An
+  indexed CRAM (`.crai`) is parallelized the same way as an indexed BAM.
 - `extract -f` splits a single BGZF-compressed or uncompressed fragment file
   into byte ranges counted in parallel across `-j` workers, so one large file
   is no longer limited to one core. Ranges start at BGZF block boundaries

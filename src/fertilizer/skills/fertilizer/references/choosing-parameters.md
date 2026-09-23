@@ -106,7 +106,7 @@ Rank caps to 2 and the test is ~nominal (0.053). This is the pairwise
 
 ## Many conditions
 
-Pseudobulk bigWigs from single-cell clusters are the usual case. At K ≥ 8 the
+Single-cell clusters are the usual case; count the fragment file per cluster with `extract -f -g` rather than summing pseudobulk bigWigs (`references/inputs.md` §Which input type). At K ≥ 8 the
 default rank 3 has almost no power (table above); use the highest safe rank
 plus the margin filter. The stderr `conservativeness` line is wrong at these
 ranks (`references/enrich.md` §Stderr); ignore it. Also:

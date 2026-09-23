@@ -1,6 +1,6 @@
 # How the test works
 
-Input: an (n regions × K conditions) matrix X of summed signal, one value per
+Input: an (n regions × K conditions) matrix X of summed signal or read counts, one value per
 region per condition, no replicates. The design follows DESeq2 (Love, Huber &
 Anders 2014) and is simplified for that setting.
 

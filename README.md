@@ -113,7 +113,7 @@ fertilizer extract -f fragments.tsv.gz -g cells.tsv --group-column cluster -b re
 
 ### `fertilizer extract` — signal aggregation
 
-Compute a per-region summary statistic (mean by default; `-s` chooses among `mean`/`max`/`min`/`sum`/`std`/`coverage`) for each bigWig over each region in the concatenated BED input. One row per region, one column per bigWig. Input row order is preserved.
+For bigWigs, compute a per-region summary statistic (mean by default; `-s` chooses among `mean`/`max`/`min`/`sum`/`std`/`coverage`) for each file over each region in the concatenated BED input. For BAM/SAM/CRAM and fragment files, count reads or fragment ends per region instead ([BAM and fragment input](#bam-and-fragment-input)). One row per region, one column per input file (or per barcode group). Input row order is preserved.
 
 | flag | description |
 | --- | --- |
@@ -124,7 +124,7 @@ Compute a per-region summary statistic (mean by default; `-s` chooses among `mea
 | `-o`, `--output` | path to the output TSV; gzip-compressed when the name ends in `.gz` (the metadata header is kept, and `enrich` reads it from the compressed file) |
 | `-s`, `--stat` | bigWig input only. Per-region summary statistic: `mean` (default), `max`, `min`, `sum`, `std`, `coverage`. Maps to pyBigWig's `stats(type=..., exact=True)`, so values come from the full-resolution data rather than the bigWig's zoom levels. **Use `sum` if the output will be passed to `fertilizer enrich`** — the NB-GLM assumes count-like input. `extract` writes a `# fertilizer-extract stat=...` header line so `enrich` can verify this. |
 | `-n`, `--names` | optional explicit column names, one per input file. Overrides the default of using each file's name without its extension (`A.bw` → `A`, `C1.fragments.tsv.gz` → `C1.fragments`). Useful when two paths share a basename (e.g. `RNAseq/A.bw` and `ATACseq/A.bw`). A name that matches a BED column present in the input (`chrom`, `start`, `end`, `name`, `score`, `strand`, `bed_col_<i>`) is rejected. |
-| `-j`, `--n-jobs` | parallel worker threads (default `-1`, one per core). On a shared machine set this explicitly; the work is split into one chunk per worker per bigWig |
+| `-j`, `--n-jobs` | parallel workers (default `-1`, one per core). On a shared machine set this explicitly. bigWigs use threads, splitting the regions into one chunk per worker per file; BAM/CRAM and fragment input use processes and split within a file ([BAM and fragment input](#bam-and-fragment-input)) |
 
 **Coordinates are 0-based half-open**, matching the standard BED/UCSC bigWig convention. A region `chr1 100 200` covers bases 100..199 inclusive (length 100). If your input is a 1-based file (UCSC table dumps, some BED-like exports), subtract 1 from `start` before running `extract`.
 
@@ -155,14 +155,16 @@ With `-a` or `-f`, each region's value is a **count** of positions falling in `[
 | --- | --- |
 | `-ps`, `--pos-shift` | added to each read's or fragment's start coordinate before counting (default 0) |
 | `-ns`, `--neg-shift` | added to each read's or fragment's end coordinate before counting (default 0). The two shifts behave exactly as bam2bw's `-ps`/`-ns`; `-ps 4 -ns -5` applies the standard Tn5 offset. 10x fragment files are already shifted, so leave both at 0 for them |
-| `--min-mapq` | BAM only: skip reads with mapping quality below this (default 30) |
-| `--include-flagged` | BAM only: count reads carrying these flags, which are skipped by default: `duplicate`, `secondary`, `supplementary`, `qcfail`. Unmapped reads are always skipped |
+| `--min-mapq` | BAM/CRAM only: skip reads with mapping quality below this (default 30) |
+| `--include-flagged` | BAM/CRAM only: count reads carrying these flags, which are skipped by default: `duplicate`, `secondary`, `supplementary`, `qcfail`. Unmapped reads are always skipped |
 | `-g`, `--groups` | fragment files only: a tab-separated table with a header row (plain or gzipped) assigning cell barcodes to groups. Writes one column per group, in order of first appearance, summed over every `-f` file; barcodes not in the table are ignored and a barcode listed under two groups is an error. Cannot be combined with `-n` |
 | `--barcode-column`, `--group-column` | the `--groups` columns holding barcodes and group labels (defaults `barcode` and `group`) |
 
 Counting reads directly gives `enrich` true counts. A bigWig `sum` over a coverage track is roughly reads × fragment length, so the Poisson part of the NB variance understates sampling noise on that scale, most at low counts.
 
-An indexed BAM or CRAM (`.bai`, `.csi` or `.crai`) is split into chromosome pieces, about four per `-j` worker, run in separate processes. Pieces are sized by how many reads the index records on each chromosome (mapped reads for a BAM index, compressed data for a `.crai`), and chromosomes with no reads are skipped; each read is counted by the piece where its leftmost aligned base lies, so a single-chromosome file also uses every worker; an unindexed one, or a SAM, is streamed as one task. Fragment files are streamed in chunks, so memory does not grow with file size and no index is needed. A BGZF-compressed file (what 10x and `bgzip` write) or an uncompressed one is also split into byte ranges so that a single large file uses all `-j` workers: roughly `-j` divided by the number of files ranges per file, each at least 16 MB. Ranges are cut at BGZF block starts and every line is counted by exactly one range. Plain (non-BGZF) gzip cannot be split and is read by one worker. Each worker parses 16 MB of text at a time; on a 3.8 GB fragment file counted into 70 groups, peak memory was about 0.25 GB per worker (8 GB at `-j 32`).
+**Parallelism.** An indexed BAM or CRAM (`.bai`, `.csi` or `.crai`) is split into chromosome pieces, about four per `-j` worker, run in separate processes. Pieces are sized by how many reads the index records on each chromosome (mapped reads for a BAM index, compressed data for a `.crai`), and chromosomes with no reads are skipped, so a single-chromosome file also uses every worker. Each read is counted by the piece where its leftmost aligned base lies. An unindexed BAM or CRAM, or a SAM, is streamed as one task.
+
+Fragment files are streamed in chunks, so memory does not grow with file size and no index is needed. A BGZF-compressed file (what 10x and `bgzip` write) or an uncompressed one is also split into byte ranges so that a single large file uses all `-j` workers: roughly `-j` divided by the number of files ranges per file, each at least 16 MB. Ranges are cut at BGZF block starts and every line is counted by exactly one range. Plain (non-BGZF) gzip cannot be split and is read by one worker. Each worker parses 16 MB of text at a time; on a 3.8 GB fragment file counted into 70 groups, peak memory was about 0.25 GB per worker (8 GB at `-j 32`).
 
 The output header records the input and shifts (`# fertilizer-extract stat=count source=fragments pos_shift=0 neg_shift=0`), and `enrich` accepts it without `--allow-non-sum`. Locus-level problems are reported as for bigWigs, with two differences for fragment files, which carry no chromosome lengths: a chromosome counts as missing when it never appears in the file, and regions past a chromosome's end are not detected.
 
@@ -221,7 +223,7 @@ Size-factor spread, Poisson fallbacks, `--fit-type zero`, and `common-fallback` 
 | `--size-factors` | externally-supplied size factors, one positive value per `-c` entry in the same order. Bypasses median-of-ratios. Use when you have an external normalization you trust more (RPM/RPKM, spike-in). Pass `1 1 1 ...` to disable normalization entirely. |
 | `--background-rank` | rank of the condition compared against `k*` in the LRT pair (default `3` — tolerates one competing peak; `2` compares against the runner-up; larger values tolerate more competing peaks). Capped to K when larger; the default therefore works at K = 2 without special-casing. |
 | `--pseudocount` | pseudocount for the effect-size log2 transform only; does not affect the LRT. Must be > 0 (default `0.5`) |
-| `--allow-non-sum` | bypass the check that the input was produced by `fertilizer extract --stat sum`. The NB-GLM assumes count-like input; `mean`/`max`/`min`/`std`/`coverage` are not counts, so p-values may be miscalibrated. Use only after empirically verifying calibration on your data. |
+| `--allow-non-sum` | bypass the check that the input was produced by `fertilizer extract --stat sum` or by counting BAM/CRAM/fragment input (`stat=count`). The NB-GLM assumes count-like input; `mean`/`max`/`min`/`std`/`coverage` are not counts, so p-values may be miscalibrated. Use only after empirically verifying calibration on your data. |
 
 **Differences from DESeq2** (non-exhaustive):
 
@@ -232,7 +234,7 @@ Size-factor spread, Poisson fallbacks, `--fit-type zero`, and `common-fallback` 
 - **Log2 fold change shrinkage.** DESeq2 optionally shrinks LFC estimates (apeglm / ashr); we report a raw log2 fold change of the enriched condition vs the mean of the others as the effect size.
 - **Observation-level outliers.** DESeq2 uses Cook's distance to flag and optionally refit without outliers. We don't.
 - **Independent filtering.** DESeq2 filters low-signal loci out of multiple-testing correction to maximize power at a given FDR. We don't — use `--min-signal` (dispersion-only) or pre-filter the input TSV if you want this.
-- **Integer counts.** DESeq2 is designed for integer RNA-seq counts; the NB likelihood here is evaluated with `scipy.special.gammaln` and is numerically correct for any non-negative float input. (This matches the common practice of passing fractional RSEM/salmon expected counts to DESeq2 via `tximport`, and is required here because bigWig region means are real-valued.)
+- **Integer counts.** DESeq2 is designed for integer RNA-seq counts; the NB likelihood here is evaluated with `scipy.special.gammaln` and is numerically correct for any non-negative float input. (This matches the common practice of passing fractional RSEM/salmon expected counts to DESeq2 via `tximport`, and is required here because bigWig sums are real-valued.)
 
 **Known calibration behavior.** The Bonferroni × K correction for the data-driven argmax makes this test **conservative under the null** at K ≥ 4 with the default rank, increasingly so as K grows. Empirical Type-I rates at nominal α = 0.05 on Poisson nulls under the default `--background-rank 3`: K = 2 → ≈0.05 (rank capped to 2; `k*` vs runner-up); K = 3 → ≈0.07–0.09, above nominal (rank 3 is the lowest of three conditions, where the order-statistic gap is widest; `enrich` warns about this on every K = 3 run at the default rank); K = 4 → ≈0.015; K ≥ 5 → well under 0.005. With `--background-rank 2` the test is uniformly conservative across all K: K = 3 → ≈0.008, K ≥ 5 → well under 0.001. The test suite verifies Type-I error at α = 0.05 stays under 0.10 at K = 3 and under 0.05 for K ≥ 4 under the default, and under 0.08 across the same grid at `--background-rank 2`. Power is preserved against strong effects (≥80% at 2× fold change, ≥99% at 3× fold change across K ∈ {2…8} in simulations). At low μ (< ~5) the delta-method and the median-bias correction both degrade, and low-μ loci are excluded from dispersion estimation via `--min-signal`. Depletion-only patterns (one condition low, the rest uniform) are simulated in the test suite and confirmed *not* to be called.
 
@@ -275,6 +277,15 @@ regions = load_regions(["regions.bed"])                  # chrom/start/end
 values, issues = bigwig_region_means(regions, "A.bw")    # np.ndarray, set[str]
 # `issues` is a subset of {"missing_chrom", "out_of_bounds", "invalid_region"}
 
+# --- extract: counts from a BAM/CRAM or fragment file (serial) -----
+from fertilizer.counting import BarcodeGroups, count_bam, count_fragments
+arrays = (regions["chrom"].to_numpy(), regions["start"].to_numpy(), regions["end"].to_numpy())
+bam_counts = count_bam("A.bam", *arrays, pos_shift=4, neg_shift=-5)   # (n_regions, 1)
+groups = BarcodeGroups.from_table("cells.tsv", group_column="cluster")
+frag_counts, seen = count_fragments("fragments.tsv.gz", *arrays, groups=groups)
+# frag_counts: (n_regions, n_groups), columns in groups.names order;
+# seen: chromosomes that appeared in the file
+
 # --- enrich: enrichment NB-GLM LRT on a (n_loci, n_conditions) array
 counts = pd.read_csv("signals.tsv", sep="\t", comment="#")[["A", "B", "C"]].to_numpy(float)
 res: EnrichmentResult = enrichment_analysis(counts, fit_type="common")
@@ -313,7 +324,8 @@ warnings.simplefilter("ignore", FertilizerEnrichmentWarning)
 
 `fertilizer` ships an agent skill for [Claude Code](https://claude.com/claude-code)
 that teaches the assistant to run `extract` and `enrich` correctly: choosing
-bigWigs and a background region set, picking `--background-rank` for the
+between bigWig, BAM/CRAM and fragment input (including per-cluster pseudobulks
+of one fragment file), choosing a background region set, picking `--background-rank` for the
 question being asked, reading the stderr diagnostics and output flags, mapping
 common questions ("regions specific to X", "higher in A than B", "starting
 regions for design") to commands, and diagnosing the usual failures. It is a
@@ -366,7 +378,9 @@ On macOS: `brew install curl openssl`.
 **`extract` output is all zeros.** Most often a chromosome-naming mismatch
 between the BED and the bigWig (`chr1` vs `1`). `extract` warns when more
 than 95% of cells are exactly zero — re-check the inputs. To inspect a
-bigWig's chromosome names: `python -c "import pyBigWig; print(pyBigWig.open('A.bw').chroms())"`.
+bigWig's chromosome names: `python -c "import pyBigWig; print(pyBigWig.open('A.bw').chroms())"`;
+a BAM's or CRAM's: `samtools view -H A.bam | grep '^@SQ'`; a fragment file's:
+`zcat fragments.tsv.gz | grep -v '^#' | cut -f1 | uniq`.
 
 **`enrich` gives `q_value` near 1 for everything.** Four common causes,
 in order of likelihood:
