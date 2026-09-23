@@ -531,9 +531,9 @@ class TestCalibration:
     and simulation noise is real.
 
     At `background_rank=2`, the test is uniformly conservative across K.
-    At `background_rank=3` (default), the test is approximately nominal at
-    K=3 — where rank-3 = the lowest condition out of three and the
-    order-statistic gap is at its widest — and increasingly conservative
+    At `background_rank=3` (default), the test is above nominal at K=3
+    (~0.08; rank-3 = the lowest condition out of three, where the
+    order-statistic gap is at its widest) and increasingly conservative
     for K>=4 as Bonferroni × K dominates."""
 
     @pytest.mark.parametrize("K,mu_val", [
@@ -563,9 +563,9 @@ class TestCalibration:
         (8, 100),
     ])
     def test_default_rank_poisson_null_within_bounds(self, K, mu_val):
-        """background_rank=3 (default): approximately nominal at K=3
-        (rank-3 = lowest of three; order-statistic gap is widest here),
-        conservative for K>=4."""
+        """background_rank=3 (default): above nominal at K=3 (rank-3 =
+        lowest of three; order-statistic gap is widest here), conservative
+        for K>=4."""
         rng = np.random.default_rng(10 + K * 97 + mu_val)
         n = 4000
         counts = rng.poisson(mu_val, size=(n, K)).astype(float)
@@ -743,6 +743,21 @@ class TestEnrichmentCLI:
         ]
         assert (df["enriched_condition"] == "C").mean() > 0.5
         assert df["q_value"].le(0.05).all()
+
+    def test_k3_warning_ratio_matches_reported_rate(self, tmp_path):
+        """The K=3 warning states a rate and a multiple of nominal; the two
+        must agree with each other."""
+        import re
+
+        rng = np.random.default_rng(10)
+        inp = tmp_path / "in.tsv"
+        out = tmp_path / "out.tsv"
+        self._write_input(inp, **{c: rng.poisson(60, size=200).astype(float) for c in "ABC"})
+        with pytest.warns(FertilizerEnrichmentWarning, match="at K=3") as rec:
+            assert main(self._enrich_argv(inp, list("ABC"), out)) == 0
+        msg = next(str(w.message) for w in rec if "at K=3" in str(w.message))
+        rate, ratio = re.search(r"is ~([0-9.]+), about ([0-9.]+)x nominal", msg).groups()
+        assert float(ratio) == pytest.approx(float(rate) / 0.05, abs=0.05)
 
     def test_filter_by_p_threshold(self, tmp_path):
         """--p-threshold AND-combines with --q-threshold, tightening output."""

@@ -30,7 +30,7 @@ project adheres to semantic versioning (the API is unstable until 1.0).
 - Overlap detection at the start of `enrich`; emits a warning when
   >1% of adjacent input regions overlap (BH validity caveat).
 - `FertilizerEnrichmentWarning` at K=3 with default `--background-rank 3`
-  about the empirical Type-I rate being ~2× nominal.
+  about the empirical Type-I rate being above nominal (~0.08).
 - CLI: example invocations in subparser epilogs; clean error+exit-2 on
   user-input errors instead of raw Python tracebacks.
 
@@ -70,6 +70,10 @@ project adheres to semantic versioning (the API is unstable until 1.0).
   `effect_size`, ...), which were overwritten in the output.
 - `extract` skips UCSC `track` and `browser` lines at the top of a BED file
   instead of failing with pandas' `ParserError: Error tokenizing data`.
+- The K = 3 calibration text no longer contradicts itself. The README and
+  docstrings called the default rank "approximately nominal" at K = 3 while the
+  warning said "roughly 2x nominal"; both now say above nominal, and the warning
+  derives its multiple from the rate it reports (0.080, about 1.6x).
 - `cli.main` catches `ValueError` / `FileNotFoundError` and emits
   `fertilizer: error: <msg>` to stderr with exit code 2, instead of
   surfacing a Python traceback for user-input errors.

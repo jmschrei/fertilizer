@@ -92,7 +92,7 @@ q-values will be optimistic. Merge or thin the regions and re-extract
 Those rows get `p_value = 1` and `lrt_convergence_failed = True`. A handful is
 harmless; many suggest extreme values (check for a mis-scaled track).
 
-## The K = 3 "roughly 2x nominal" warning
+## The K = 3 "about 1.6x nominal" warning
 
 Printed on every K = 3 run at the default rank. The output is usable (realized
 FDR 0.056 at q ≤ 0.05 in simulation); what to change depends on whether shared
