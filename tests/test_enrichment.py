@@ -126,6 +126,13 @@ class TestEnrichmentAnalysis:
         with pytest.raises(ValueError, match="non-negative"):
             enrichment_analysis(np.array([[1.0, -1.0], [2.0, 3.0]]))
 
+    @pytest.mark.parametrize("bad", [np.nan, np.inf])
+    def test_rejects_nonfinite_counts(self, bad):
+        counts = np.full((20, 3), 10.0)
+        counts[3, 1] = bad
+        with pytest.raises(ValueError, match="finite"):
+            enrichment_analysis(counts)
+
     def test_rejects_nonpositive_pseudocount(self):
         rng = np.random.default_rng(20)
         counts = rng.poisson(50, size=(50, 3)).astype(float)
@@ -808,6 +815,14 @@ class TestEnrichmentCLI:
         )
         assert main(self._enrich_argv(inp, ["A", "nope"], out)) == 2
         assert "columns not found" in capsys.readouterr().err
+
+    def test_empty_cell_rejected(self, tmp_path, capsys):
+        inp = tmp_path / "in.tsv"
+        out = tmp_path / "out.tsv"
+        inp.write_text("chrom\tstart\tend\tA\tB\nchr1\t0\t50\t10\t\nchr1\t100\t150\t20\t18\n")
+        assert main(self._enrich_argv(inp, ["A", "B"], out)) == 2
+        assert "finite" in capsys.readouterr().err
+        assert not out.exists()
 
     def test_single_condition_rejected(self, tmp_path, capsys):
         inp = tmp_path / "in.tsv"

@@ -475,7 +475,7 @@ def enrichment_analysis(
     Parameters
     ----------
     counts
-        (n_loci, n_conditions) non-negative float array. Typically the
+        (n_loci, n_conditions) non-negative, finite float array. Typically the
         numeric columns of `fertilizer extract`'s output.
     pseudocount
         Added to normalized counts before the log2 transform used for
@@ -512,6 +512,12 @@ def enrichment_analysis(
         raise ValueError(
             f"counts must be (n_loci, n_conditions) with n_conditions >= 2; "
             f"got shape {counts.shape}"
+        )
+    n_nonfinite = int((~np.isfinite(counts)).sum())
+    if n_nonfinite > 0:
+        raise ValueError(
+            f"counts must be finite; found {n_nonfinite} NaN or infinite "
+            "value(s). An empty cell in the input TSV is read as NaN."
         )
     if (counts < 0).any():
         raise ValueError("counts must be non-negative")
