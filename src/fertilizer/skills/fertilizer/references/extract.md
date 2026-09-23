@@ -37,7 +37,8 @@ fertilizer extract -f fragments.tsv.gz -g cells.tsv --group-column cluster \
   `--include-flagged <names>` change that. An indexed BAM runs one process per
   chromosome.
 - Fragment file: counts both ends (`start`, `end − 1`) of each line once; column
-  5 (duplicates) is ignored. Streamed, no index needed.
+  5 (duplicates) is ignored. Streamed, no index needed; a BGZF or uncompressed
+  file over ~32 MB is split across `-j` workers (plain gzip is not).
 - `-ps`/`-ns` are added to the start/end coordinate exactly as in bam2bw.
   `-ps 4 -ns -5` is the Tn5 offset for BAMs; 10x fragments are already shifted,
   so leave both at 0 for them.
