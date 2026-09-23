@@ -17,6 +17,8 @@ from fertilizer.counting import (
     FLAG_BITS,
     BarcodeGroups,
     RegionCounter,
+    bam_chrom_lengths,
+    bam_has_index,
     count_bam,
     count_fragments,
     count_issues,
@@ -53,11 +55,22 @@ def _random_reads(rng, n=400):
 	return reads
 
 
-def _write_alignments(path, reads, index=True):
+def _write_reference(path):
+	"""A random FASTA for REFS, indexed, for writing CRAMs against."""
+	rng = np.random.default_rng(99)
+	with open(path, "w") as fh:
+		for name, length in REFS:
+			fh.write(f">{name}\n{''.join(rng.choice(list('ACGT'), size=length))}\n")
+	pysam.faidx(str(path))
+	return path
+
+
+def _write_alignments(path, reads, index=True, reference=None):
 	header = {"HD": {"VN": "1.6", "SO": "coordinate"},
 	          "SQ": [{"SN": name, "LN": length} for name, length in REFS]}
-	mode = "w" if str(path).endswith(".sam") else "wb"
-	with pysam.AlignmentFile(str(path), mode, header=header) as out:
+	mode = {".sam": "w", "cram": "wc"}.get(str(path)[-4:], "wb")
+	extra = {"reference_filename": str(reference)} if mode == "wc" else {}
+	with pysam.AlignmentFile(str(path), mode, header=header, **extra) as out:
 		for i, (ref, start, cigar, flag, mapq) in enumerate(sorted(reads, key=lambda r: (r[0], r[1]))):
 			seg = pysam.AlignedSegment()
 			seg.query_name = f"read{i}"
@@ -144,6 +157,7 @@ class TestInputStem:
 	    ("atac.tsv", "atac"),
 	    ("x/y/sample.bam", "sample"),
 	    ("reads.sam", "reads"),
+	    ("reads.cram", "reads"),
 	    ("peaks.bed.gz", "peaks"),
 	    ("odd.name.txt", "odd.name"),
 	])
@@ -309,11 +323,76 @@ class TestCountBam:
 		arrays = _arrays(regions)
 		np.testing.assert_array_equal(count_bam(str(path), *arrays, batch=7), count_bam(str(path), *arrays))
 
+	def test_corrupt_records_raise_value_error(self, tmp_path, reads, regions):
+		"""A file whose header opens but whose records fail to decode (here,
+		garbage in the middle of a BAM whose end-of-file marker is intact)
+		surfaces as ValueError, not a raw OSError."""
+		path = _write_alignments(tmp_path / "a.bam", reads, index=False)
+		data = path.read_bytes()
+		mid = len(data) // 2
+		path.write_bytes(data[:mid] + b"\x00" * 64 + data[mid + 64:])
+		with pytest.raises(ValueError, match="could not read"):
+			count_bam(str(path), *_arrays(regions))
+
 	def test_unreadable_file_raises_value_error(self, tmp_path):
 		bad = tmp_path / "bad.bam"
 		bad.write_text("not a bam")
 		with pytest.raises(ValueError, match="could not open BAM"):
 			count_bam(str(bad), *_arrays([("chr1", 0, 10)]))
+
+
+class TestCountCram:
+	"""CRAM is read without decoding sequences, so counts must match the BAM
+	path exactly and must not need the reference FASTA."""
+
+	@pytest.fixture
+	def reads(self):
+		return _random_reads(np.random.default_rng(10))
+
+	@pytest.fixture
+	def regions(self):
+		return _random_regions(np.random.default_rng(11))
+
+	@pytest.fixture
+	def cram(self, tmp_path, reads, monkeypatch):
+		"""An indexed CRAM whose reference is deleted after writing, with
+		htslib's reference lookup (REF_PATH, REF_CACHE) disabled."""
+		ref = _write_reference(tmp_path / "ref.fa")
+		path = _write_alignments(tmp_path / "a.cram", reads, reference=ref)
+		for f in (ref, tmp_path / "ref.fa.fai"):
+			f.unlink()
+		monkeypatch.setenv("REF_PATH", ":")
+		monkeypatch.setenv("REF_CACHE", str(tmp_path / "no_cache"))
+		return path
+
+	@pytest.mark.parametrize("kwargs", [
+	    {},
+	    {"pos_shift": 4, "neg_shift": -5},
+	    {"pos_shift": 0, "neg_shift": -9},
+	    {"min_mapq": 0, "skip_flags": 0},
+	])
+	def test_matches_brute_force_without_reference(self, cram, reads, regions, kwargs):
+		counts = count_bam(str(cram), *_arrays(regions), **kwargs)
+		ref_kwargs = {k: v for k, v in kwargs.items() if k != "skip_flags"}
+		if "skip_flags" in kwargs:
+			ref_kwargs["include"] = tuple(FLAG_BITS)
+		np.testing.assert_array_equal(counts[:, 0], _bam_reference_counts(reads, regions, **ref_kwargs))
+
+	def test_indexed_per_contig_sum_equals_whole_file(self, cram, regions):
+		arrays = _arrays(regions)
+		assert bam_has_index(str(cram))
+		whole = count_bam(str(cram), *arrays)
+		np.testing.assert_array_equal(whole, sum(count_bam(str(cram), *arrays, contig=n) for n, _ in REFS))
+
+	def test_unindexed_cram(self, tmp_path, reads, regions):
+		ref = _write_reference(tmp_path / "ref.fa")
+		path = _write_alignments(tmp_path / "a.cram", reads, index=False, reference=ref)
+		assert not bam_has_index(str(path))
+		counts = count_bam(str(path), *_arrays(regions))
+		np.testing.assert_array_equal(counts[:, 0], _bam_reference_counts(reads, regions))
+
+	def test_chrom_lengths_from_header(self, cram):
+		assert bam_chrom_lengths(str(cram)) == dict(REFS)
 
 
 class TestCountIssues:
@@ -359,6 +438,19 @@ class TestExtractCLI:
 		assert header == "# fertilizer-extract stat=count source=bam pos_shift=4 neg_shift=-5\n"
 		np.testing.assert_array_equal(df["A"], _bam_reference_counts(reads_a, regions, 4, -5))
 		np.testing.assert_array_equal(df["B"], _bam_reference_counts(reads_b, regions, 4, -5))
+
+	def test_cram_end_to_end(self, tmp_path):
+		rng = np.random.default_rng(12)
+		regions, reads = _random_regions(rng), _random_reads(rng)
+		ref = _write_reference(tmp_path / "ref.fa")
+		cram = _write_alignments(tmp_path / "S.cram", reads, reference=ref)
+		bed = _write_bed(tmp_path / "r.bed", regions)
+		out = tmp_path / "out.tsv"
+		assert main(["extract", "-a", str(cram), "-b", str(bed), "-o", str(out),
+		             "-ps", "4", "-ns", "-5", "-j", "2"]) == 0
+		header, df = _read_output(out)
+		assert header.startswith("# fertilizer-extract stat=count source=bam")
+		np.testing.assert_array_equal(df["S"], _bam_reference_counts(reads, regions, 4, -5))
 
 	def test_bam_filter_flags(self, tmp_path):
 		rng = np.random.default_rng(4)

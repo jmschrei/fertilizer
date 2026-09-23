@@ -8,6 +8,9 @@ project adheres to semantic versioning (the API is unstable until 1.0).
 
 ### Added
 
+- `extract -a` reads CRAM as well as BAM/SAM. Only the fields the counts use
+  are decoded (htslib `required_fields`), so no reference FASTA is needed; an
+  indexed CRAM (`.crai`) is split per chromosome like an indexed BAM.
 - `extract` counts reads from BAM/SAM files (`-a/--bams`) and fragment ends
   from 10x fragment files (`-f/--fragments`), in addition to summarizing
   bigWigs. BAMs count each read's 5' end, skipping unmapped, duplicate,

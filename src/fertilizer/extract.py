@@ -1,5 +1,5 @@
 """Signal aggregation over BED regions from bigWig tracks, and read or
-fragment counts from BAM/SAM and 10x fragment files."""
+fragment counts from BAM/SAM/CRAM and 10x fragment files."""
 
 from __future__ import annotations
 
@@ -274,8 +274,9 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPa
 	)
 	inputs.add_argument(
 	    "-a", "--bams", nargs="+", metavar="BAM",
-	    help="One or more BAM/SAM files. Counts the 5' end of each read; each "
-	         "mate of a pair counts separately.",
+	    help="One or more BAM/SAM/CRAM files. Counts the 5' end of each read; "
+	         "each mate of a pair counts separately. CRAM needs no reference "
+	         "FASTA.",
 	)
 	inputs.add_argument(
 	    "-f", "--fragments", nargs="+", metavar="FRAGMENTS",
@@ -319,12 +320,12 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPa
 	)
 	counts.add_argument(
 	    "--min-mapq", type=int, default=None,
-	    help="BAM only: skip reads with mapping quality below this (default 30).",
+	    help="BAM/CRAM only: skip reads with mapping quality below this (default 30).",
 	)
 	counts.add_argument(
 	    "--include-flagged", nargs="+", choices=sorted(counting.FLAG_BITS),
 	    default=None, metavar="FLAG",
-	    help="BAM only: count reads with these flags, which are skipped by "
+	    help="BAM/CRAM only: count reads with these flags, which are skipped by "
 	         "default: duplicate, secondary, supplementary, qcfail. Unmapped "
 	         "reads are always skipped.",
 	)
@@ -430,8 +431,8 @@ def _extract_counts(
 	"""Counts per region for BAM or fragment input, as an (n_regions,
 	n_columns) array, plus (path, issues, chromosomes in file) per file.
 
-	Fragment files are streamed one task per file. An indexed BAM is split
-	into one task per chromosome; an unindexed BAM or a SAM is one task.
+	Fragment files are streamed one task per file. An indexed BAM or CRAM is
+	split into one task per chromosome; an unindexed one, or a SAM, is one task.
 	Tasks run in separate processes because pysam iteration holds the GIL.
 	"""
 	n = len(chroms)

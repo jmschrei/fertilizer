@@ -1,12 +1,13 @@
-"""Read and fragment counts over BED regions from BAM/SAM and 10x fragment files.
+"""Read and fragment counts over BED regions from BAM/SAM/CRAM and 10x fragment files.
 
 Every input is reduced to positions, and a region's count is the number of
 positions falling in its half-open interval [start, end):
 
-- **BAM/SAM:** the 5' end of each read that passes the filters: the leftmost
+- **BAM/SAM/CRAM:** the 5' end of each read that passes the filters: the leftmost
   aligned base for a forward read, the rightmost for a reverse read. Each mate
   of a pair is a separate read, so for paired-end ATAC-seq this counts both
-  Tn5 insertions of every fragment.
+  Tn5 insertions of every fragment. CRAM is read without decoding read
+  sequences, which the counts never use, so no reference FASTA is needed.
 - **Fragment files** (10x `chrom, start, end, barcode, count`): both ends of
   every fragment, i.e. its two Tn5 insertions, at `start` and `end - 1`. Each
   line counts once; the duplicate count in column 5 is ignored.
@@ -19,6 +20,7 @@ offset. 10x fragment files are already shifted.
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 
 import numpy as np
@@ -48,7 +50,7 @@ FLAG_BITS = {
 _UNMAPPED = 0x4
 _REVERSE = 0x10
 
-_STRIP_SUFFIXES = (".tsv.gz", ".tsv.bgz", ".bed.gz", ".tsv", ".bed", ".bam", ".sam")
+_STRIP_SUFFIXES = (".tsv.gz", ".tsv.bgz", ".bed.gz", ".tsv", ".bed", ".bam", ".sam", ".cram")
 
 
 def input_stem(path: str) -> str:
@@ -212,22 +214,43 @@ def count_fragments(
 	return counter.counts, observed
 
 
+# htslib CRAM option: decode only QNAME, FLAG, RNAME, POS, MAPQ and CIGAR
+# (SAM_QNAME..SAM_CIGAR = 0x3F). Skipping the sequence and qualities means the
+# reference FASTA is never consulted, and decoding is faster.
+_CRAM_FORMAT_OPTIONS = [b"required_fields=0x3F"]
+
+
 def _open_alignments(path: str):
-	mode = "r" if str(path).endswith(".sam") else "rb"
+	path = str(path)
 	try:
-		return pysam.AlignmentFile(path, mode)
+		if path.endswith(".cram"):
+			return pysam.AlignmentFile(path, "rc", format_options=_CRAM_FORMAT_OPTIONS)
+		return pysam.AlignmentFile(path, "r" if path.endswith(".sam") else "rb")
 	except (OSError, ValueError) as e:
-		raise ValueError(f"could not open BAM/SAM {path!r}: {e}") from e
+		raise ValueError(f"could not open BAM/SAM/CRAM {path!r}: {e}") from e
+
+
+@contextlib.contextmanager
+def _reading(path: str):
+	"""Open alignments for reading; a failure while closing (htslib raises
+	one after a decode error) must not replace the error that caused it."""
+	bam = _open_alignments(path)
+	try:
+		yield bam
+	finally:
+		with contextlib.suppress(OSError):
+			bam.close()
 
 
 def bam_chrom_lengths(path: str) -> dict[str, int]:
-	"""Chromosome lengths from the BAM/SAM header."""
+	"""Chromosome lengths from the BAM/SAM/CRAM header."""
 	with _open_alignments(path) as bam:
 		return dict(zip(bam.references, bam.lengths, strict=True))
 
 
 def bam_has_index(path: str) -> bool:
-	"""Whether `path` is a BAM with an index, so it can be read per chromosome."""
+	"""Whether `path` is a BAM or CRAM with an index (.bai/.csi/.crai), so it
+	can be read per chromosome."""
 	if str(path).endswith(".sam"):
 		return False
 	with _open_alignments(path) as bam:
@@ -254,35 +277,43 @@ def count_bam(
 	"""
 	counter = RegionCounter(chroms, starts, ends, 1)
 	skip = skip_flags | _UNMAPPED
-	with _open_alignments(path) as bam:
+	with _reading(path) as bam:
 		names = bam.references
 		wanted = {i for i, name in enumerate(names) if name in counter.index}
 		buffers: dict[int, list[int]] = {}
 		n_buffered = 0
-		reads = bam.fetch(contig) if contig is not None else bam.fetch(until_eof=True)
-		for read in reads:
-			flag = read.flag
-			if flag & skip or read.mapping_quality < min_mapq:
-				continue
-			rid = read.reference_id
-			if rid not in wanted:
-				continue
-			if flag & _REVERSE:
-				end = read.reference_end
-				if end is None:
-					raise ValueError(
-					    f"{path}: read {read.query_name} is mapped to {names[rid]} "
-					    "but has no CIGAR, so its reference end is unknown"
-					)
-				position = end + neg_shift - 1
-			else:
-				position = read.reference_start + pos_shift
-			buffers.setdefault(rid, []).append(position)
-			n_buffered += 1
-			if n_buffered >= batch:
-				for r, buf in buffers.items():
-					counter.add(names[r], np.array(buf, dtype=np.int64))
-				buffers, n_buffered = {}, 0
+		try:
+			reads = bam.fetch(contig) if contig is not None else bam.fetch(until_eof=True)
+			for read in reads:
+				flag = read.flag
+				if flag & skip or read.mapping_quality < min_mapq:
+					continue
+				rid = read.reference_id
+				if rid not in wanted:
+					continue
+				if flag & _REVERSE:
+					end = read.reference_end
+					if end is None:
+						raise ValueError(
+						    f"{path}: read {read.query_name} is mapped to {names[rid]} "
+						    "but has no CIGAR, so its reference end is unknown"
+						)
+					position = end + neg_shift - 1
+				else:
+					position = read.reference_start + pos_shift
+				buffers.setdefault(rid, []).append(position)
+				n_buffered += 1
+				if n_buffered >= batch:
+					for r, buf in buffers.items():
+						counter.add(names[r], np.array(buf, dtype=np.int64))
+					buffers, n_buffered = {}, 0
+		except OSError as e:
+			# htslib reports undecodable records (e.g. a CRAM whose reference it
+			# needs but cannot find) as OSError mid-iteration.
+			raise ValueError(
+			    f"could not read {path!r}: {e}. For a CRAM, htslib may need the "
+			    "reference FASTA; point the REF_PATH environment variable at it"
+			) from e
 		for r, buf in buffers.items():
 			counter.add(names[r], np.array(buf, dtype=np.int64))
 	return counter.counts
