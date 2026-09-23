@@ -11,6 +11,17 @@ project adheres to semantic versioning (the API is unstable until 1.0).
 - `extract -a` reads CRAM as well as BAM/SAM. Only the fields the counts use
   are decoded (htslib `required_fields`), so no reference FASTA is needed; an
   indexed CRAM (`.crai`) is split per chromosome like an indexed BAM.
+- `extract -f` splits a single BGZF-compressed or uncompressed fragment file
+  into byte ranges counted in parallel across `-j` workers, so one large file
+  is no longer limited to one core. Ranges start at BGZF block boundaries
+  (found by walking the block headers; no index needed) and every line is
+  counted by exactly one range. Plain gzip is still read as one stream.
+- `extract -a` splits an indexed BAM or CRAM into chromosome pieces (about
+  four per `-j` worker) instead of one task per chromosome, so a
+  single-chromosome file uses every worker and scaling no longer stops at the
+  largest chromosome. Pieces are sized by the reads the index records per
+  chromosome, empty chromosomes are skipped, and each read is counted by the
+  piece where it starts.
 - `extract` counts reads from BAM/SAM files (`-a/--bams`) and fragment ends
   from 10x fragment files (`-f/--fragments`), in addition to summarizing
   bigWigs. BAMs count each read's 5' end, skipping unmapped, duplicate,

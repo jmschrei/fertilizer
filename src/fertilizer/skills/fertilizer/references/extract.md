@@ -34,10 +34,11 @@ fertilizer extract -f fragments.tsv.gz -g cells.tsv --group-column cluster \
 - BAM: counts the 5′ end of each read; each mate counts separately (paired-end
   ATAC gives both insertions). Skips unmapped, `duplicate`, `secondary`,
   `supplementary` and `qcfail` reads and MAPQ < 30; `--min-mapq` and
-  `--include-flagged <names>` change that. An indexed BAM runs one process per
-  chromosome.
+  `--include-flagged <names>` change that. An indexed BAM or CRAM is split
+  into chromosome pieces across `-j` workers; an unindexed one is one stream.
 - Fragment file: counts both ends (`start`, `end − 1`) of each line once; column
-  5 (duplicates) is ignored. Streamed, no index needed.
+  5 (duplicates) is ignored. Streamed, no index needed; a BGZF or uncompressed
+  file over ~32 MB is split across `-j` workers (plain gzip is not).
 - `-ps`/`-ns` are added to the start/end coordinate exactly as in bam2bw.
   `-ps 4 -ns -5` is the Tn5 offset for BAMs; 10x fragments are already shifted,
   so leave both at 0 for them.
