@@ -1,7 +1,8 @@
 # `fertilizer extract`
 
-Sums (or otherwise summarizes) each bigWig over each BED region and writes one
-row per region, one column per bigWig.
+Sums (or otherwise summarizes) each bigWig over each BED region, or counts reads
+from BAMs or fragment ends from 10x fragment files, and writes one row per
+region, one column per input (or per barcode group).
 
 ```bash
 fertilizer extract -w liver.bw heart.bw brain.bw -b background.bed \
@@ -13,12 +14,41 @@ Warnings go to stderr; keep them (`2> extract.log`) and read them before
 
 | Flag | Default | Effect |
 |---|---|---|
-| `-w`, `--bigwigs` | required | one or more bigWigs |
+| `-w`, `--bigwigs` | one of `-w`/`-a`/`-f` | one or more bigWigs |
+| `-a`, `--bams` | one of `-w`/`-a`/`-f` | BAM/SAM files, counted (§BAM and fragment input) |
+| `-f`, `--fragments` | one of `-w`/`-a`/`-f` | 10x fragment files, counted (§BAM and fragment input) |
 | `-b`, `--beds` | required | one or more BED files, concatenated in order |
 | `-o`, `--output` | required | output TSV; gzipped when the name ends `.gz` |
-| `-s`, `--stat` | **`mean`** | `mean`, `max`, `min`, `sum`, `std`, `coverage` (pyBigWig `stats(type=..., exact=True)`). **Use `sum` for `enrich`** |
-| `-n`, `--names` | filename stems | column names, one per `-w` entry, same order |
+| `-s`, `--stat` | **`mean`** (bigWig only) | `mean`, `max`, `min`, `sum`, `std`, `coverage` (pyBigWig `stats(type=..., exact=True)`). **Use `sum` for `enrich`** |
+| `-n`, `--names` | file names without extension | column names, one per input file, same order |
 | `-j`, `--n-jobs` | `-1` = every core | worker threads. Always set it; on a shared machine take at most half the free cores |
+
+## BAM and fragment input
+
+```bash
+fertilizer extract -a liver.bam heart.bam -b background.bed -o counts.tsv -ps 4 -ns -5 -j 8
+fertilizer extract -f fragments.tsv.gz -g cells.tsv --group-column cluster \
+	-b background.bed -o counts.tsv
+```
+
+- BAM: counts the 5′ end of each read; each mate counts separately (paired-end
+  ATAC gives both insertions). Skips unmapped, `duplicate`, `secondary`,
+  `supplementary` and `qcfail` reads and MAPQ < 30; `--min-mapq` and
+  `--include-flagged <names>` change that. An indexed BAM runs one process per
+  chromosome.
+- Fragment file: counts both ends (`start`, `end − 1`) of each line once; column
+  5 (duplicates) is ignored. Streamed, no index needed.
+- `-ps`/`-ns` are added to the start/end coordinate exactly as in bam2bw.
+  `-ps 4 -ns -5` is the Tn5 offset for BAMs; 10x fragments are already shifted,
+  so leave both at 0 for them.
+- `-g` takes a TSV with a header; `--barcode-column` (default `barcode`) and
+  `--group-column` (default `group`) name the columns. One output column per
+  group, summed over all `-f` files; unlisted barcodes are dropped. Barcodes must
+  match the fragment file exactly, including any `-1` GEM suffix.
+- Header line: `# fertilizer-extract stat=count source=bam|fragments ...`;
+  `enrich` accepts it. Fragment files have no chromosome lengths, so a chromosome
+  is "missing" only if it never appears, and out-of-bounds regions are not
+  detected.
 
 ## Output
 

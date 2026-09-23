@@ -1,12 +1,13 @@
 ---
 name: fertilizer
-description: Call genomic regions where one condition's signal is significantly enriched over the others, from one bigWig per condition, with the `fertilizer` CLI (`fertilizer extract`, `fertilizer enrich`) or its Python API (`fertilizer.enrichment.enrichment_analysis`). Use when asked to find condition-specific, cell type-specific or differential regions/peaks/enhancers from bigWigs without replicates; to aggregate bigWig signal over BED regions into a region-by-track matrix; to pick "fertile ground" starting regions for regulatory DNA design; to choose `--background-rank`, `--size-factors` or dispersion settings; to interpret `effect_size`, `q_value`, `enriched_condition` or the `lrt_zero_dominated` flag; or to debug all-zero extract output, "q-values all near 1", the `--stat sum` refusal, or chromosome-naming warnings. Router skill — read the relevant file under `references/` before writing any fertilizer command or code.
+description: Call genomic regions where one condition's signal is significantly enriched over the others, from one bigWig, BAM or 10x fragment file per condition, with the `fertilizer` CLI (`fertilizer extract`, `fertilizer enrich`) or its Python API (`fertilizer.enrichment.enrichment_analysis`). Use when asked to find condition-specific, cell type-specific or differential regions/peaks/enhancers from bigWigs without replicates; to aggregate bigWigs, or count BAM reads or fragment insertions, over BED regions (including per-cluster pseudobulks of one fragment file); to pick "fertile ground" starting regions for regulatory DNA design; to choose `--background-rank`, `--size-factors` or dispersion settings; to interpret `effect_size`, `q_value`, `enriched_condition` or the `lrt_zero_dominated` flag; or to debug all-zero extract output, "q-values all near 1", the `--stat sum` refusal, or chromosome-naming warnings. Router skill — read the relevant file under `references/` before writing any fertilizer command or code.
 ---
 
 # fertilizer
 
-`fertilizer` takes **one bigWig per condition** and a BED of regions, sums each
-track's signal over each region (`extract`), and runs a one-sided
+`fertilizer` takes **one bigWig, BAM or fragment file per condition** (or one
+fragment file split by a barcode-to-group table) and a BED of regions, sums each
+track's signal or counts reads/insertions over each region (`extract`), and runs a one-sided
 negative-binomial likelihood-ratio test per region asking whether the
 top-ranked condition is significantly above the others (`enrich`). Output is a
 TSV with `effect_size` (log2), `p_value`, `q_value` and `enriched_condition`.
@@ -19,13 +20,14 @@ PyPI name `fertilizer-genomics`, import name `fertilizer`, CLI `fertilizer`.
 | Replicates per condition | DESeq2 / edgeR / csaw on the replicate counts (`references/inputs.md` §Replicates) |
 | You want regions *depleted* in one condition | not tested by `enrich`; pairwise workaround in `references/recipes.md` |
 | Most regions genuinely change, or a global shift in the mark | only with external `--size-factors` (spike-in); `references/choosing-parameters.md` |
-| Tracks are `-log10` p-value, log-scale, z-score or otherwise non-count | make coverage bigWigs from the BAMs (`references/inputs.md`). p-value tracks run without error and give meaningless calls |
+| Tracks are `-log10` p-value, log-scale, z-score or otherwise non-count | count the BAMs or fragment files directly with `extract -a`/`-f` (`references/inputs.md`). p-value tracks run without error and give meaningless calls |
 | Dense overlapping / sliding windows | thin to non-overlapping windows first |
 
 ## Rules that hold everywhere
 
-- **`extract -s sum`**, always, when the output feeds `enrich`. The default
-  stat is `mean`, and `enrich` refuses it.
+- **`extract -s sum`**, always, when bigWig output feeds `enrich`. The default
+  stat is `mean`, and `enrich` refuses it. BAM (`-a`) and fragment (`-f`) input
+  is always counted and needs no `-s`.
 - **Pass `-j N` to `extract`.** The default `-1` takes every core.
 - **Pass a background-matched region set** (union of all conditions' peaks,
   cCREs, genome-wide windows), never one pre-filtered to expected hits.
@@ -47,8 +49,8 @@ PyPI name `fertilizer-genomics`, import name `fertilizer`, CLI `fertilizer`.
 | If the task is… | Read |
 |---|---|
 | install, run the demo, or the minimal two-command pipeline | `references/quickstart.md` |
-| choosing bigWigs and the region set; strands, replicates, chr naming, external count matrices | `references/inputs.md` |
-| `fertilizer extract` flags, stats, coordinates, warnings, output format | `references/extract.md` |
+| choosing bigWigs, BAMs or fragment files and the region set; strands, replicates, chr naming, external count matrices | `references/inputs.md` |
+| `fertilizer extract` flags, stats, BAM/fragment counting, Tn5 shifts, barcode groups, coordinates, warnings, output format | `references/extract.md` |
 | `fertilizer enrich` flags, stderr diagnostics, output columns | `references/enrich.md` |
 | how the test works; how it differs from DESeq2 | `references/method.md` |
 | choosing `--background-rank`, K, dispersion settings; calibration and power | `references/choosing-parameters.md` |
@@ -67,6 +69,7 @@ PyPI name `fertilizer-genomics`, import name `fertilizer`, CLI `fertilizer`.
 | "Lower in X than everywhere else" | intersect K = 2 runs — `references/recipes.md` §5 |
 | "How robust are these calls?" | `--dispersion` sweep — `references/recipes.md` §6 |
 | "Starting regions for ledidi / regulatory design" | `references/recipes.md` §7 |
+| "I have a fragments file and cluster labels" | `extract -f fragments.tsv.gz -g cells.tsv --group-column <col>` — `references/extract.md` §BAM and fragment input |
 | "I have 8+ conditions" / pseudobulk bigWigs per single-cell cluster | `references/choosing-parameters.md` §Many conditions |
 | "My normalization / spike-in factors" | `--size-factors` — `references/recipes.md` §8 |
 
@@ -75,7 +78,7 @@ PyPI name `fertilizer-genomics`, import name `fertilizer`, CLI `fertilizer`.
 | If you hit… | Read |
 |---|---|
 | `input was produced by \`fertilizer extract --stat mean\`` | `references/troubleshooting.md` — re-run with `-s sum` |
-| `N% of region-by-bigWig cells are exactly zero` / `chromosome '1' ... missing from bigWig` | `references/troubleshooting.md` — chr naming or assembly |
+| `N% of region-by-bigWig (or -column) cells are exactly zero` / `chromosome '1' ... missing from bigWig` (or BAM, fragment file) | `references/troubleshooting.md` — chr naming or assembly |
 | `at least 2 loci with positive signal in every sample are required` | `references/troubleshooting.md` |
 | `q_value` near 1 everywhere, or zero rows kept | `references/troubleshooting.md` |
 | K = 3 warning "about 1.6x nominal" | `references/choosing-parameters.md` §K = 3 |

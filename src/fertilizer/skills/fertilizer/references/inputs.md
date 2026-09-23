@@ -1,4 +1,13 @@
-# Inputs: bigWigs and the region set
+# Inputs: bigWigs, BAMs, fragment files and the region set
+
+## Which input type
+
+If the BAMs or 10x fragment files are available, count them (`extract -a` or
+`-f`) rather than summing bigWigs: the values are true read or insertion counts,
+which is what `enrich` models, and scale (below) stops being a question. A
+single scATAC fragment file plus a barcode-to-cluster table gives one column per
+cluster with `-g` (`references/extract.md` §BAM and fragment input). Use
+bigWigs when they are all you have, or for predicted tracks.
 
 ## Which bigWigs
 
