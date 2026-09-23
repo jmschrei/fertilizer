@@ -55,6 +55,10 @@ project adheres to semantic versioning (the API is unstable until 1.0).
 - `extract` no longer caches open bigWig handles across calls. A bigWig
   rewritten at the same path in the same process (for example, from a notebook)
   was read from the stale handle and returned the old values.
+- `enrichment_analysis` (and so `enrich`) raises `ValueError` on NaN or
+  infinite counts. Previously a NaN, such as an empty cell in the input TSV,
+  was accepted silently: that locus got the NaN column as its enriched
+  condition, a NaN effect size and p = 1.
 - `cli.main` catches `ValueError` / `FileNotFoundError` and emits
   `fertilizer: error: <msg>` to stderr with exit code 2, instead of
   surfacing a Python traceback for user-input errors.
