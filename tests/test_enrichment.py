@@ -830,6 +830,15 @@ class TestEnrichmentCLI:
         assert "finite" in capsys.readouterr().err
         assert not out.exists()
 
+    @pytest.mark.parametrize("name", ["p_value", "effect_size", "enriched_condition"])
+    def test_condition_named_like_output_column_rejected(self, tmp_path, capsys, name):
+        inp = tmp_path / "in.tsv"
+        out = tmp_path / "out.tsv"
+        self._write_input(inp, A=np.full(20, 50.0), **{name: np.full(20, 50.0)})
+        assert main(self._enrich_argv(inp, ["A", name], out)) == 2
+        assert "output column" in capsys.readouterr().err
+        assert not out.exists()
+
     def test_single_condition_rejected(self, tmp_path, capsys):
         inp = tmp_path / "in.tsv"
         out = tmp_path / "out.tsv"

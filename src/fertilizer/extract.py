@@ -279,14 +279,20 @@ def run_extract(args: argparse.Namespace) -> int:
         stems = list(args.names)
     else:
         stems = [Path(bw).stem for bw in args.bigwigs]
+    source = "--names" if args.names is not None else "bigWig filename stems"
     dupes = [stem for stem, count in Counter(stems).items() if count > 1]
     if dupes:
-        source = "--names" if args.names is not None else "bigWig filename stems"
         raise ValueError(
             f"duplicate column names from {source} would collide: {sorted(dupes)}"
         )
 
     regions = load_regions(args.beds)
+    clash = sorted(set(stems) & set(regions.columns))
+    if clash:
+        raise ValueError(
+            f"column names {clash} from {source} would overwrite the BED "
+            "column(s) of the same name; pass -n/--names to rename the tracks"
+        )
     n = len(regions)
 
     chroms = regions["chrom"].to_numpy()

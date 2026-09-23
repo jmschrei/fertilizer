@@ -63,6 +63,11 @@ project adheres to semantic versioning (the API is unstable until 1.0).
   reject negative, NaN and infinite values. A negative value previously
   produced p-values from an invalid likelihood, and NaN set every p-value
   to 1, both without a warning.
+- `extract` rejects track names (from `--names` or filename stems) that match
+  a BED column in the input, such as `score` or `chrom`. Previously the
+  track's values silently replaced that column. `enrich` likewise rejects
+  condition columns named like one of its output columns (`p_value`,
+  `effect_size`, ...), which were overwritten in the output.
 - `cli.main` catches `ValueError` / `FileNotFoundError` and emits
   `fertilizer: error: <msg>` to stderr with exit code 2, instead of
   surfacing a Python traceback for user-input errors.

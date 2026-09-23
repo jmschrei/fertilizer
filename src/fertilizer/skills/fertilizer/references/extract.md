@@ -50,6 +50,9 @@ The stem of each path: `liver.bw` → `liver`, `ENCFF123ABC.bigWig` →
 fertilizer: error: duplicate column names from bigWig filename stems would collide: ['A']
 ```
 
+A name that matches a BED column present in the input (`chrom`, `start`,
+`end`, `name`, `score`, `strand`, `bed_col_<i>`) is rejected too.
+
 Pass `-n` whenever stems are accessions, contain strand characters, or
 collide. `-n` may also reuse one bigWig under two names.
 

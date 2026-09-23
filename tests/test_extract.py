@@ -563,6 +563,25 @@ class TestRun:
         with pytest.raises(ValueError, match="duplicate"):
             run(args)
 
+    @pytest.mark.parametrize("name", ["chrom", "start", "end", "score"])
+    def test_name_colliding_with_bed_column_rejected(self, tmp_path, dense_bw, name):
+        bed = tmp_path / "a.bed"
+        _write_bed(bed, [("chr1", 0, 500, "peak1", 7, "+")])
+        out = tmp_path / "out.tsv"
+        args = _make_args([dense_bw], [bed], out, names=[name])
+        with pytest.raises(ValueError, match="BED column"):
+            run(args)
+        assert not out.exists()
+
+    def test_name_matching_absent_bed_column_allowed(self, tmp_path, dense_bw):
+        """A BED3 input has no `score` column, so a track named `score` is fine."""
+        bed = tmp_path / "a.bed"
+        _write_bed(bed, [("chr1", 0, 500)])
+        out = tmp_path / "out.tsv"
+        run(_make_args([dense_bw], [bed], out, names=["score"]))
+        df = pd.read_csv(out, sep="\t", comment="#")
+        np.testing.assert_allclose(df["score"], [2.0])
+
     def test_all_zero_output_warns(self, tmp_path, empty_bw):
         bed = tmp_path / "a.bed"
         _write_bed(bed, [("chr1", 0, 500), ("chr1", 500, 1000)])
