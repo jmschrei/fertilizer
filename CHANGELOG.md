@@ -68,6 +68,8 @@ project adheres to semantic versioning (the API is unstable until 1.0).
   track's values silently replaced that column. `enrich` likewise rejects
   condition columns named like one of its output columns (`p_value`,
   `effect_size`, ...), which were overwritten in the output.
+- `extract` skips UCSC `track` and `browser` lines at the top of a BED file
+  instead of failing with pandas' `ParserError: Error tokenizing data`.
 - `cli.main` catches `ValueError` / `FileNotFoundError` and emits
   `fertilizer: error: <msg>` to stderr with exit code 2, instead of
   surfacing a Python traceback for user-input errors.
