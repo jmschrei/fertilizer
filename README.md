@@ -118,7 +118,7 @@ Compute a per-region summary statistic (mean by default; `-s` chooses among `mea
 | flag | description |
 | --- | --- |
 | `-w`, `--bigwigs` | one or more bigWig signal tracks. Exactly one of `-w`, `-a` or `-f` is given per run |
-| `-a`, `--bams` | one or more BAM/SAM files, counted as described in [BAM and fragment input](#bam-and-fragment-input) |
+| `-a`, `--bams` | one or more BAM/SAM/CRAM files, counted as described in [BAM and fragment input](#bam-and-fragment-input) |
 | `-f`, `--fragments` | one or more 10x fragment files (plain or gzipped), counted as described in [BAM and fragment input](#bam-and-fragment-input) |
 | `-b`, `--beds` | one or more BED region files. Columns 1-3 are required (`chrom`/`start`/`end`); columns 4-6 are passed through as `name`/`score`/`strand`; any further columns are passed through as `bed_col_<i>` (BED12 and narrowPeak disagree on the meaning of columns 7+, so generic names are used to avoid mislabeling). `#` comment lines are skipped, as are UCSC `track` and `browser` lines at the top of a file. |
 | `-o`, `--output` | path to the output TSV; gzip-compressed when the name ends in `.gz` (the metadata header is kept, and `enrich` reads it from the compressed file) |
@@ -148,7 +148,7 @@ Column names come from each input file's name without its extension (override wi
 
 With `-a` or `-f`, each region's value is a **count** of positions falling in `[start, end)`:
 
-- **BAM/SAM (`-a`):** the 5′ end of each read — the leftmost aligned base of a forward read, the rightmost of a reverse read. Each mate of a pair is counted separately, so for paired-end ATAC-seq this counts both Tn5 insertions of every fragment.
+- **BAM/SAM/CRAM (`-a`):** the 5′ end of each read — the leftmost aligned base of a forward read, the rightmost of a reverse read. CRAM is decoded without read sequences, which the counts never use, so no reference FASTA is needed. Each mate of a pair is counted separately, so for paired-end ATAC-seq this counts both Tn5 insertions of every fragment.
 - **Fragment files (`-f`):** both ends of every fragment, i.e. its two Tn5 insertions, at `start` and `end − 1`. The expected layout is 10x's `chrom, start, end, barcode, count`, with optional `#` header lines. Each line counts once; the duplicate count in column 5 is ignored.
 
 | flag | description |
@@ -162,7 +162,7 @@ With `-a` or `-f`, each region's value is a **count** of positions falling in `[
 
 Counting reads directly gives `enrich` true counts. A bigWig `sum` over a coverage track is roughly reads × fragment length, so the Poisson part of the NB variance understates sampling noise on that scale, most at low counts.
 
-An indexed BAM (`.bai`) is split into one task per chromosome and run across `-j` processes; an unindexed BAM or a SAM is streamed as one task. Fragment files are streamed in chunks, one process per file, so memory does not grow with file size and no index is needed.
+An indexed BAM or CRAM (`.bai`, `.csi` or `.crai`) is split into one task per chromosome and run across `-j` processes; an unindexed one, or a SAM, is streamed as one task. Fragment files are streamed in chunks, one process per file, so memory does not grow with file size and no index is needed.
 
 The output header records the input and shifts (`# fertilizer-extract stat=count source=fragments pos_shift=0 neg_shift=0`), and `enrich` accepts it without `--allow-non-sum`. Locus-level problems are reported as for bigWigs, with two differences for fragment files, which carry no chromosome lengths: a chromosome counts as missing when it never appears in the file, and regions past a chromosome's end are not detected.
 
@@ -343,7 +343,7 @@ fertilizer/
 │       ├── __init__.py
 │       ├── cli.py             # top-level argparse dispatcher
 │       ├── extract.py         # signal aggregation + `extract` subcommand
-│       ├── counting.py        # BAM/SAM and fragment-file counting for `extract`
+│       ├── counting.py        # BAM/SAM/CRAM and fragment-file counting for `extract`
 │       ├── enrichment.py      # enrichment analysis + `enrich` subcommand
 │       ├── install_skill.py   # `install-skill` subcommand
 │       └── skills/fertilizer/ # bundled Claude Code skill (SKILL.md + references/)

@@ -15,7 +15,7 @@ Warnings go to stderr; keep them (`2> extract.log`) and read them before
 | Flag | Default | Effect |
 |---|---|---|
 | `-w`, `--bigwigs` | one of `-w`/`-a`/`-f` | one or more bigWigs |
-| `-a`, `--bams` | one of `-w`/`-a`/`-f` | BAM/SAM files, counted (§BAM and fragment input) |
+| `-a`, `--bams` | one of `-w`/`-a`/`-f` | BAM/SAM/CRAM files, counted (§BAM and fragment input); CRAM needs no reference FASTA |
 | `-f`, `--fragments` | one of `-w`/`-a`/`-f` | 10x fragment files, counted (§BAM and fragment input) |
 | `-b`, `--beds` | required | one or more BED files, concatenated in order |
 | `-o`, `--output` | required | output TSV; gzipped when the name ends `.gz` |
