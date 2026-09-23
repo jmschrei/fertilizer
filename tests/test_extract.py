@@ -834,3 +834,103 @@ class TestZoomLevels:
         vals, issues = bigwig_region_means(regions, str(path), stat=stat)
         np.testing.assert_allclose(vals, expected, rtol=1e-5)
         assert issues == set()
+
+
+class TestPartialCoverage:
+    """Uncovered bases are skipped, not treated as 0, by every statistic
+    except `coverage` (which is the covered fraction) and `sum`."""
+
+    @pytest.fixture
+    def two_block_bw(self, tmp_path):
+        """chr1 (1000bp): [0, 100)=5.0, [100, 150)=1.0, rest uncovered."""
+        return _make_bw(tmp_path / "two_block.bw", [("chr1", 1000)],
+                        (["chr1", "chr1"], [0, 100], [100, 150], [5.0, 1.0]))
+
+    @pytest.mark.parametrize("stat,expected", [
+        ("mean", 3.0),                         # 50 bp of 5.0, 50 bp of 1.0
+        ("max", 5.0),
+        ("min", 1.0),                          # not 0.0 from the uncovered half
+        ("sum", 300.0),
+        ("std", np.sqrt(400 / 99)),            # ddof=1 over the 100 covered bases
+        ("coverage", 0.5),
+    ])
+    def test_region_half_covered(self, two_block_bw, stat, expected):
+        regions = pd.DataFrame({"chrom": ["chr1"], "start": [50], "end": [250]})
+        vals, issues = bigwig_region_means(regions, str(two_block_bw), stat=stat)
+        np.testing.assert_allclose(vals, [expected])
+        assert issues == set()
+
+
+class TestExtractIO:
+    def test_unopenable_bigwig_raises_value_error(self, tmp_path):
+        bad = tmp_path / "not_a.bw"
+        bad.write_text("this is not a bigWig\n")
+        regions = pd.DataFrame({"chrom": ["chr1"], "start": [0], "end": [100]})
+        with pytest.raises(ValueError, match="could not open bigWig"):
+            bigwig_region_means(regions, str(bad))
+
+    def test_unopenable_bigwig_cli_exit_2(self, tmp_path, capsys):
+        from fertilizer.cli import main
+
+        bad = tmp_path / "not_a.bw"
+        bad.write_text("this is not a bigWig\n")
+        bed = tmp_path / "a.bed"
+        _write_bed(bed, [("chr1", 0, 100)])
+        assert main(["extract", "-w", str(bad), "-b", str(bed),
+                     "-o", str(tmp_path / "out.tsv"), "-j", "1"]) == 2
+        assert "could not open bigWig" in capsys.readouterr().err
+
+    def test_gzip_output_keeps_header(self, tmp_path, dense_bw):
+        import gzip
+
+        bed = tmp_path / "a.bed"
+        _write_bed(bed, [("chr1", 0, 500), ("chr1", 500, 1000)])
+        out = tmp_path / "out.tsv.gz"
+        run(_make_args([dense_bw], [bed], out, stat="sum"))
+        with gzip.open(out, "rt") as fh:
+            assert fh.readline() == "# fertilizer-extract stat=sum\n"
+            df = pd.read_csv(fh, sep="\t")
+        np.testing.assert_allclose(df["dense"], [1000.0, 3000.0])
+
+    def test_extract_gzip_output_feeds_enrich(self, tmp_path):
+        """`extract -o x.tsv.gz` then `enrich -i x.tsv.gz` runs end to end,
+        and the stat header survives compression."""
+        from fertilizer.cli import main
+
+        rng = np.random.default_rng(0)
+        n = 300
+        starts = np.arange(n) * 100
+        bws = []
+        for name in "ABC":
+            path = tmp_path / f"{name}.bw"
+            _make_bw(path, [("chr1", n * 100)],
+                     (["chr1"] * n, starts.tolist(), (starts + 100).tolist(),
+                      rng.poisson(20, n).astype(float).tolist()))
+            bws.append(str(path))
+        bed = tmp_path / "a.bed"
+        _write_bed(bed, [("chr1", s, s + 100) for s in starts])
+        signals = tmp_path / "signals.tsv.gz"
+        out = tmp_path / "out.tsv"
+        assert main(["extract", "-w", *bws, "-b", str(bed), "-o", str(signals),
+                     "-s", "sum", "-j", "1"]) == 0
+        assert main(["enrich", "-i", str(signals), "-c", "A", "B", "C",
+                     "-o", str(out), "--q-threshold", "1.0"]) == 0
+        assert len(pd.read_csv(out, sep="\t")) == n
+        # The gzipped header also carries a non-sum stat, which enrich refuses.
+        assert main(["extract", "-w", *bws, "-b", str(bed), "-o", str(signals),
+                     "-s", "mean", "-j", "1"]) == 0
+        assert main(["enrich", "-i", str(signals), "-c", "A", "B", "C",
+                     "-o", str(out)]) == 2
+
+
+def test_bigwig_region_means_rejects_unknown_stat(tmp_path):
+    regions = pd.DataFrame({"chrom": ["chr1"], "start": [0], "end": [100]})
+    with pytest.raises(ValueError, match="unknown stat"):
+        bigwig_region_means(regions, str(tmp_path / "unused.bw"), stat="median")
+
+
+def test_unknown_issue_key_has_fallback_message():
+    from fertilizer.extract import _format_issue_warning
+
+    msg = _format_issue_warning("something_new", "x.bw", "chr1", [])
+    assert "something_new" in msg and "x.bw" in msg
