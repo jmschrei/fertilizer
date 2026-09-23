@@ -4,7 +4,7 @@ All notable changes to `fertilizer` will be documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to semantic versioning (the API is unstable until 1.0).
 
-## [Unreleased]
+## [0.2.0] - 2026-09-23
 
 ### Added
 
@@ -108,6 +108,6 @@ project adheres to semantic versioning (the API is unstable until 1.0).
 - Renamed module-level `run` to `run_extract` / `run_enrich` to avoid
   the cross-module name collision.
 
-## [0.1.0]
+## [0.1.0] - 2026-04-24
 
 - Initial release.

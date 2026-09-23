@@ -1,6 +1,6 @@
 [project]
 name = "fertilizer-genomics"
-version = "0.1.0"
+version = "0.2.0"
 description = "Identify fertile ground in genomes for minimal-edit regulatory design."
 readme = "README.md"
 requires-python = ">=3.10"
