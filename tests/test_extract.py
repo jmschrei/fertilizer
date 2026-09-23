@@ -153,6 +153,33 @@ class TestLoadRegions:
         df = load_regions([str(path)])
         assert df["chrom"].tolist() == ["chr1", "chr2"]
 
+    @pytest.mark.parametrize("suffix", [".bed", ".bed.gz"])
+    def test_ucsc_header_lines_skipped(self, tmp_path, suffix):
+        import gzip
+
+        text = (
+            "browser position chr1:1-1000\n"
+            "browser hide all\n"
+            'track name="peaks" description="a b c" visibility=2\n'
+            "# comment\n"
+            "chr1\t0\t100\tp1\n"
+            "chr2\t200\t300\tp2\n"
+        )
+        path = tmp_path / f"a{suffix}"
+        opener = gzip.open if suffix.endswith(".gz") else open
+        with opener(path, "wt") as f:
+            f.write(text)
+        df = load_regions([str(path)])
+        assert df["chrom"].tolist() == ["chr1", "chr2"]
+        assert df["start"].tolist() == [0, 200]
+        assert df["name"].tolist() == ["p1", "p2"]
+
+    def test_header_only_bed_produces_empty_frame(self, tmp_path):
+        path = tmp_path / "a.bed"
+        path.write_text('track name="empty"\n')
+        df = load_regions([str(path)])
+        assert len(df) == 0
+
     def test_empty_bed_produces_empty_frame(self, tmp_path):
         path = tmp_path / "empty.bed"
         path.write_text("")

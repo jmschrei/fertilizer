@@ -95,6 +95,18 @@ def _empty_regions() -> pd.DataFrame:
 _BED_COL_NAMES = ("chrom", "start", "end", "name", "score", "strand")
 
 
+def _count_header_lines(path: str) -> int:
+    """Number of leading UCSC `track`/`browser`, `#` comment or blank lines."""
+    opener = gzip.open if str(path).endswith(".gz") else open
+    n = 0
+    with opener(path, "rt", errors="replace") as fh:
+        for line in fh:
+            if line.strip() and not line.startswith(("track", "browser", "#")):
+                break
+            n += 1
+    return n
+
+
 def load_regions(bed_paths: list[str]) -> pd.DataFrame:
     """Load one or more BED files and return a single frame.
 
@@ -106,7 +118,8 @@ def load_regions(bed_paths: list[str]) -> pd.DataFrame:
 
     Chromosome names are forced to string dtype so numeric-named chroms
     (e.g. "1", "2") survive round-trips against bigWig keys. `#`-prefixed
-    comment lines are skipped. Empty BED files contribute zero rows.
+    comment lines are skipped, as are UCSC `track` and `browser` lines at the
+    top of a file. Empty BED files contribute zero rows.
 
     All input BED files are expected to have the same number of columns;
     extra columns in some files but not others will produce NaN in the
@@ -117,6 +130,7 @@ def load_regions(bed_paths: list[str]) -> pd.DataFrame:
         try:
             frame = pd.read_csv(
                 path, sep="\t", header=None, comment="#",
+                skiprows=_count_header_lines(path),
                 dtype={0: str, 1: np.int64, 2: np.int64},
             )
         except pd.errors.EmptyDataError:
