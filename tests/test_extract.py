@@ -321,6 +321,18 @@ class TestBigwigRegionMeans:
         vals, _ = bigwig_region_means(regions, str(dense_bw))
         np.testing.assert_allclose(vals, [6.0, 2.0])
 
+    def test_rewritten_bigwig_is_reread(self, tmp_path):
+        """A bigWig rewritten at the same path in the same process (e.g. a
+        notebook re-running the cell that makes it) must be read afresh."""
+        path = tmp_path / "rewritten.bw"
+        regions = pd.DataFrame({"chrom": ["chr1"], "start": [0], "end": [100]})
+        _make_bw(path, [("chr1", 1000)], (["chr1"], [0], [1000], [1.0]))
+        vals, _ = bigwig_region_means(regions, str(path))
+        np.testing.assert_array_equal(vals, [1.0])
+        _make_bw(path, [("chr1", 1000)], (["chr1"], [0], [1000], [9.0]))
+        vals, _ = bigwig_region_means(regions, str(path))
+        np.testing.assert_array_equal(vals, [9.0])
+
 class TestMultiChromSparseBigwig:
     """A multi-chromosome, sparse bigWig exercises the full matrix of
     block/gap combinations: fully-in-block, fully-in-gap, block-gap boundary
@@ -638,6 +650,18 @@ class TestRun:
         a = pd.read_csv(serial_out, sep="\t", comment="#")
         b = pd.read_csv(parallel_out, sep="\t", comment="#")
         pd.testing.assert_frame_equal(a, b)
+
+
+    def test_rewritten_bigwig_is_reread_across_runs(self, tmp_path):
+        bed = tmp_path / "a.bed"
+        _write_bed(bed, [("chr1", 0, 100)])
+        bw = tmp_path / "A.bw"
+        out = tmp_path / "out.tsv"
+        for value in (1.0, 9.0):
+            _make_bw(bw, [("chr1", 1000)], (["chr1"], [0], [1000], [value]))
+            run(_make_args([bw], [bed], out, n_jobs=1))
+            df = pd.read_csv(out, sep="\t", comment="#")
+            np.testing.assert_array_equal(df["A"], [value])
 
 
 class TestStat:
