@@ -85,7 +85,7 @@ tool when:
 
 ## Usage
 
-`fertilizer` exposes two subcommands. Typical workflow:
+`fertilizer` exposes two analysis subcommands (plus `install-skill`, below). Typical workflow:
 
 ```bash
 fertilizer extract -w A.bw B.bw C.bw -b regions.bed -o signals.tsv -s sum
@@ -251,6 +251,28 @@ res: EnrichmentResult = enrichment_analysis(counts, fit_type="common")
 
 `FertilizerWarning` (locus-level issues from `extract`) and `FertilizerEnrichmentWarning` (size-factor spread, Poisson fallbacks from `enrich`) are both `UserWarning` subclasses — catch them with `warnings.catch_warnings()` or filter them with `warnings.simplefilter(..., FertilizerWarning)`.
 
+## Claude Code skill
+
+`fertilizer` ships an agent skill for [Claude Code](https://claude.com/claude-code)
+that teaches the assistant to run `extract` and `enrich` correctly: choosing
+bigWigs and a background region set, picking `--background-rank` for the
+question being asked, reading the stderr diagnostics and output flags, mapping
+common questions ("regions specific to X", "higher in A than B", "starting
+regions for design") to commands, and diagnosing the usual failures. It is a
+short router plus topic files that load only when needed.
+
+```bash
+fertilizer install-skill
+```
+
+This copies the skill into `~/.claude/skills/fertilizer`. Options:
+
+- `-d, --directory DIR` — install into a different skills directory (default `~/.claude/skills`).
+- `--symlink` — symlink the packaged skill instead of copying it, so an editable install is reflected without reinstalling.
+- `-f, --force` — overwrite an existing installation. **Re-run with `--force` after upgrading `fertilizer`**; without it the command refuses to replace the old copy.
+
+Restart Claude Code to pick it up.
+
 ## Project layout
 
 ```
@@ -263,13 +285,16 @@ fertilizer/
 │       ├── __init__.py
 │       ├── cli.py             # top-level argparse dispatcher
 │       ├── extract.py         # signal aggregation + `extract` subcommand
-│       └── enrichment.py      # enrichment analysis + `enrich` subcommand
+│       ├── enrichment.py      # enrichment analysis + `enrich` subcommand
+│       ├── install_skill.py   # `install-skill` subcommand
+│       └── skills/fertilizer/ # bundled Claude Code skill (SKILL.md + references/)
 ├── examples/
 │   ├── make_demo_data.py     # generates a synthetic end-to-end demo dataset
 │   └── README.md             # walkthrough of `extract` + `enrich` on demo data
 └── tests/
     ├── test_extract.py
-    └── test_enrichment.py
+    ├── test_enrichment.py
+    └── test_install_skill.py
 ```
 
 ## Troubleshooting / FAQ

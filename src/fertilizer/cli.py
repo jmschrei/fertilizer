@@ -9,7 +9,7 @@ from . import __version__
 
 
 def build_parser() -> argparse.ArgumentParser:
-    from . import enrichment, extract
+    from . import enrichment, extract, install_skill
 
     parser = argparse.ArgumentParser(
         prog="fertilizer",
@@ -26,6 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     extract.add_subparser(subparsers)
     enrichment.add_subparser(subparsers)
+    install_skill.add_subparser(subparsers)
 
     return parser
 
@@ -35,7 +36,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.func(args)
-    except (ValueError, FileNotFoundError) as e:
+    except (ValueError, FileNotFoundError, FileExistsError) as e:
         print(f"{parser.prog}: error: {e}", file=sys.stderr)
         return 2
 
