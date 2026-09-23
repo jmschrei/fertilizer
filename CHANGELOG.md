@@ -59,6 +59,10 @@ project adheres to semantic versioning (the API is unstable until 1.0).
   infinite counts. Previously a NaN, such as an empty cell in the input TSV,
   was accepted silently: that locus got the NaN column as its enriched
   condition, a NaN effect size and p = 1.
+- `enrich --dispersion` and `enrichment_analysis(dispersion_override=...)`
+  reject negative, NaN and infinite values. A negative value previously
+  produced p-values from an invalid likelihood, and NaN set every p-value
+  to 1, both without a warning.
 - `cli.main` catches `ValueError` / `FileNotFoundError` and emits
   `fertilizer: error: <msg>` to stderr with exit code 2, instead of
   surfacing a Python traceback for user-input errors.

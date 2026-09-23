@@ -490,7 +490,8 @@ def enrichment_analysis(
         dispersion the trend predicts for their mean.
     dispersion_override
         If not None, use this fixed alpha for every locus and skip
-        fitting. Useful for sensitivity analyses.
+        fitting. Must be finite and >= 0 (0 is Poisson). Useful for
+        sensitivity analyses.
     size_factor_warn_ratio
         Emit a FertilizerEnrichmentWarning when max(sf) / min(sf) exceeds this.
         Large spreads often indicate a violated null-majority assumption.
@@ -532,6 +533,13 @@ def enrichment_analysis(
             f"background_rank must be an integer >= 2 (got {background_rank!r}); "
             "rank 2 compares k* against the second-highest condition, 3 against "
             "the third-highest (tolerating one competing peak), and so on."
+        )
+    if dispersion_override is not None and not (
+        np.isfinite(dispersion_override) and dispersion_override >= 0.0
+    ):
+        raise ValueError(
+            f"dispersion_override must be finite and >= 0 (got "
+            f"{dispersion_override!r}); 0 is Poisson"
         )
     n_loci, K = counts.shape
     effective_rank = min(int(background_rank), K)
@@ -876,6 +884,13 @@ def run_enrich(args: argparse.Namespace) -> int:
         raise ValueError(
             f"--pseudocount must be > 0 (got {args.pseudocount}); pc=0 "
             "produces -inf effect sizes on zero-valued conditions"
+        )
+    if args.dispersion is not None and not (
+        np.isfinite(args.dispersion) and args.dispersion >= 0.0
+    ):
+        raise ValueError(
+            f"--dispersion must be finite and >= 0 (got {args.dispersion}); "
+            "0 is Poisson"
         )
     if args.background_rank < 2:
         raise ValueError(
