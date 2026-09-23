@@ -806,7 +806,7 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPa
 	parser.add_argument(
 	    "--allow-non-sum", action="store_true",
 	    help="Bypass the check that the input was produced by `fertilizer "
-	         "extract --stat sum`. The NB-GLM likelihood assumes count-like "
+	         "extract --stat sum` or by counting BAM/fragment input. The NB-GLM likelihood assumes count-like "
 	         "data; `mean`/`max`/`min`/`std`/`coverage` are not counts and "
 	         "the reported p-values may be miscalibrated. Use only when you "
 	         "have empirically verified calibration on your data.",
@@ -913,12 +913,14 @@ def run_enrich(args: argparse.Namespace) -> int:
 		)
 
 	extract_stat = _read_extract_stat(args.input)
-	if extract_stat is not None and extract_stat != "sum" and not args.allow_non_sum:
+	# `sum` over a bigWig and `count` from BAM/fragment input are count-like.
+	if extract_stat not in (None, "sum", "count") and not args.allow_non_sum:
 		raise ValueError(
 		    f"input was produced by `fertilizer extract --stat {extract_stat}`, "
 		    "which aggregates bigWig signal in a way that is NOT count-like; "
 		    "the NB-GLM likelihood used by `enrich` assumes count-like data. "
-		    "Re-run extract with `--stat sum`, or pass `--allow-non-sum` "
+		    "Re-run extract with `--stat sum` (or count BAM/fragment input "
+		    "with `-a`/`-f`), or pass `--allow-non-sum` "
 		    "to bypass this check at your own risk (p-values may be miscalibrated)."
 		)
 

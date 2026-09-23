@@ -1,6 +1,6 @@
 # fertilizer
 
-**What this does (concretely):** `fertilizer` takes one bigWig per condition and a set of BED regions, computes a summary statistic per region per bigWig, and calls regions where one condition has significantly higher signal than the others. Output is a TSV with effect size, p-value, q-value, and the name of the enriched condition. The statistical model is a DESeq2-inspired negative-binomial GLM likelihood-ratio test adapted to the one-replicate-per-condition setting.
+**What this does (concretely):** `fertilizer` takes one bigWig, BAM or 10x fragment file per condition (or one fragment file plus a table assigning cell barcodes to conditions) and a set of BED regions, computes a summary statistic or read count per region per condition, and calls regions where one condition has significantly higher signal than the others. Output is a TSV with effect size, p-value, q-value, and the name of the enriched condition. The statistical model is a DESeq2-inspired negative-binomial GLM likelihood-ratio test adapted to the one-replicate-per-condition setting.
 
 **Why "fertilizer".** The **Fertile Ground Hypothesis** is that genomes are full of "almost-regulatory" regions — sequences that do not do anything on their own, but can be minimally edited to achieve subtle and precise activity. Many near-motifs, for example, sit one or two substitutions away from binding a transcription factor and recruiting its downstream regulatory activity. `fertilizer` helps identify the fertile ground in a genome that is most useful for your design task by flagging regions where signal in one condition stands out from the others.
 
@@ -32,7 +32,8 @@ uv pip install -e .
 > `pyBigWig` needs `libcurl` and `libssl` headers at install time on Linux.
 > If pip fails to build it, install them first:
 > `sudo apt-get install libcurl4-openssl-dev libssl-dev zlib1g-dev` (Debian/Ubuntu)
-> or `brew install curl openssl` (macOS).
+> or `brew install curl openssl` (macOS). `pysam`, used to read BAM files,
+> ships prebuilt wheels for Linux and macOS.
 
 For a development environment with test and lint tooling:
 
@@ -58,7 +59,7 @@ resulting `enrichment.tsv` should contain ~10 rows, each with
 
 ## When NOT to use this
 
-`fertilizer` is designed for the **one-bigWig-per-condition** setting with
+`fertilizer` is designed for the **one-sample-per-condition** setting with
 many loci, most of which are not differentially enriched. It is the wrong
 tool when:
 
@@ -77,7 +78,9 @@ tool when:
 - **Your bigWig aggregates are not count-like.** `enrich` refuses input
   produced by `extract --stat mean / max / min / std / coverage`
   (override at your own risk with `--allow-non-sum`). The NB-GLM
-  assumes the variance-mean relationship of count data.
+  assumes the variance-mean relationship of count data. If you have the
+  BAM or fragment files, count those instead (see
+  [BAM and fragment input](#bam-and-fragment-input)).
 - **Your regions overlap densely** (sliding/tiling windows). BH controls
   FDR under independence or PRDS; overlapping windows violate this and
   q-values will be optimistic. Thin to non-overlapping regions, or use a
@@ -92,8 +95,18 @@ fertilizer extract -w A.bw B.bw C.bw -b regions.bed -o signals.tsv -s sum
 fertilizer enrich  -i signals.tsv -c A B C -o enrichment.tsv
 ```
 
+`extract` also counts reads from BAM files (`-a`) or fragment ends from 10x
+fragment files (`-f`), optionally splitting one fragment file into
+per-group pseudobulks with a barcode table (`-g`):
+
+```bash
+fertilizer extract -a A.bam B.bam C.bam -b regions.bed -o counts.tsv -ps 4 -ns -5
+fertilizer extract -f fragments.tsv.gz -g cells.tsv --group-column cluster -b regions.bed -o counts.tsv
+```
+
 > The NB-GLM in `enrich` assumes **count-like** input. Use `extract --stat sum`
-> (the total signal over each region) — `mean`/`max`/`min`/`std`/`coverage`
+> (the total signal over each region) for bigWigs, or count BAM/fragment
+> input, which is always counted — bigWig `mean`/`max`/`min`/`std`/`coverage`
 > are not counts and `enrich` will refuse them unless `--allow-non-sum` is
 > passed. `extract` writes a metadata header (`# fertilizer-extract stat=...`)
 > that `enrich` reads to enforce this.
@@ -104,11 +117,13 @@ Compute a per-region summary statistic (mean by default; `-s` chooses among `mea
 
 | flag | description |
 | --- | --- |
-| `-w`, `--bigwigs` | one or more bigWig signal tracks |
+| `-w`, `--bigwigs` | one or more bigWig signal tracks. Exactly one of `-w`, `-a` or `-f` is given per run |
+| `-a`, `--bams` | one or more BAM/SAM files, counted as described in [BAM and fragment input](#bam-and-fragment-input) |
+| `-f`, `--fragments` | one or more 10x fragment files (plain or gzipped), counted as described in [BAM and fragment input](#bam-and-fragment-input) |
 | `-b`, `--beds` | one or more BED region files. Columns 1-3 are required (`chrom`/`start`/`end`); columns 4-6 are passed through as `name`/`score`/`strand`; any further columns are passed through as `bed_col_<i>` (BED12 and narrowPeak disagree on the meaning of columns 7+, so generic names are used to avoid mislabeling). `#` comment lines are skipped, as are UCSC `track` and `browser` lines at the top of a file. |
 | `-o`, `--output` | path to the output TSV; gzip-compressed when the name ends in `.gz` (the metadata header is kept, and `enrich` reads it from the compressed file) |
-| `-s`, `--stat` | per-region summary statistic: `mean` (default), `max`, `min`, `sum`, `std`, `coverage`. Maps to pyBigWig's `stats(type=..., exact=True)`, so values come from the full-resolution data rather than the bigWig's zoom levels. **Use `sum` if the output will be passed to `fertilizer enrich`** — the NB-GLM assumes count-like input. `extract` writes a `# fertilizer-extract stat=...` header line so `enrich` can verify this. |
-| `-n`, `--names` | optional explicit column names, one per `--bigwigs` entry. Overrides the default of using each bigWig's filename stem. Useful when two paths share a basename (e.g. `RNAseq/A.bw` and `ATACseq/A.bw`). A name that matches a BED column present in the input (`chrom`, `start`, `end`, `name`, `score`, `strand`, `bed_col_<i>`) is rejected. |
+| `-s`, `--stat` | bigWig input only. Per-region summary statistic: `mean` (default), `max`, `min`, `sum`, `std`, `coverage`. Maps to pyBigWig's `stats(type=..., exact=True)`, so values come from the full-resolution data rather than the bigWig's zoom levels. **Use `sum` if the output will be passed to `fertilizer enrich`** — the NB-GLM assumes count-like input. `extract` writes a `# fertilizer-extract stat=...` header line so `enrich` can verify this. |
+| `-n`, `--names` | optional explicit column names, one per input file. Overrides the default of using each file's name without its extension (`A.bw` → `A`, `C1.fragments.tsv.gz` → `C1.fragments`). Useful when two paths share a basename (e.g. `RNAseq/A.bw` and `ATACseq/A.bw`). A name that matches a BED column present in the input (`chrom`, `start`, `end`, `name`, `score`, `strand`, `bed_col_<i>`) is rejected. |
 | `-j`, `--n-jobs` | parallel worker threads (default `-1`, one per core). On a shared machine set this explicitly; the work is split into one chunk per worker per bigWig |
 
 **Coordinates are 0-based half-open**, matching the standard BED/UCSC bigWig convention. A region `chr1 100 200` covers bases 100..199 inclusive (length 100). If your input is a 1-based file (UCSC table dumps, some BED-like exports), subtract 1 from `start` before running `extract`.
@@ -127,7 +142,29 @@ chr1    1500    2000    4.0     7.0     4.4
 chr2    0       100     0.0     0.0     0.0
 ```
 
-Column names come from each bigWig's filename stem (override with `-n/--names`), so passing two bigWigs with the same basename (even from different directories) without `--names` is rejected up front. `extract` also emits a `FertilizerWarning` if more than 95% of the output cells are exactly zero — almost always a wrong path or a chromosome-naming mismatch (e.g. `chr1` in the BED but `1` in the bigWig).
+Column names come from each input file's name without its extension (override with `-n/--names`), so passing two files with the same basename (even from different directories) without `--names` is rejected up front. `extract` also emits a `FertilizerWarning` if more than 95% of the output cells are exactly zero — almost always a wrong path or a chromosome-naming mismatch (e.g. `chr1` in the BED but `1` in the bigWig).
+
+#### BAM and fragment input
+
+With `-a` or `-f`, each region's value is a **count** of positions falling in `[start, end)`:
+
+- **BAM/SAM (`-a`):** the 5′ end of each read — the leftmost aligned base of a forward read, the rightmost of a reverse read. Each mate of a pair is counted separately, so for paired-end ATAC-seq this counts both Tn5 insertions of every fragment.
+- **Fragment files (`-f`):** both ends of every fragment, i.e. its two Tn5 insertions, at `start` and `end − 1`. The expected layout is 10x's `chrom, start, end, barcode, count`, with optional `#` header lines. Each line counts once; the duplicate count in column 5 is ignored.
+
+| flag | description |
+| --- | --- |
+| `-ps`, `--pos-shift` | added to each read's or fragment's start coordinate before counting (default 0) |
+| `-ns`, `--neg-shift` | added to each read's or fragment's end coordinate before counting (default 0). The two shifts behave exactly as bam2bw's `-ps`/`-ns`; `-ps 4 -ns -5` applies the standard Tn5 offset. 10x fragment files are already shifted, so leave both at 0 for them |
+| `--min-mapq` | BAM only: skip reads with mapping quality below this (default 30) |
+| `--include-flagged` | BAM only: count reads carrying these flags, which are skipped by default: `duplicate`, `secondary`, `supplementary`, `qcfail`. Unmapped reads are always skipped |
+| `-g`, `--groups` | fragment files only: a tab-separated table with a header row (plain or gzipped) assigning cell barcodes to groups. Writes one column per group, in order of first appearance, summed over every `-f` file; barcodes not in the table are ignored and a barcode listed under two groups is an error. Cannot be combined with `-n` |
+| `--barcode-column`, `--group-column` | the `--groups` columns holding barcodes and group labels (defaults `barcode` and `group`) |
+
+Counting reads directly gives `enrich` true counts. A bigWig `sum` over a coverage track is roughly reads × fragment length, so the Poisson part of the NB variance understates sampling noise on that scale, most at low counts.
+
+An indexed BAM (`.bai`) is split into one task per chromosome and run across `-j` processes; an unindexed BAM or a SAM is streamed as one task. Fragment files are streamed in chunks, one process per file, so memory does not grow with file size and no index is needed.
+
+The output header records the input and shifts (`# fertilizer-extract stat=count source=fragments pos_shift=0 neg_shift=0`), and `enrich` accepts it without `--allow-non-sum`. Locus-level problems are reported as for bigWigs, with two differences for fragment files, which carry no chromosome lengths: a chromosome counts as missing when it never appears in the file, and regions past a chromosome's end are not detected.
 
 ### `fertilizer enrich` — enrichment analysis
 
@@ -306,6 +343,7 @@ fertilizer/
 │       ├── __init__.py
 │       ├── cli.py             # top-level argparse dispatcher
 │       ├── extract.py         # signal aggregation + `extract` subcommand
+│       ├── counting.py        # BAM/SAM and fragment-file counting for `extract`
 │       ├── enrichment.py      # enrichment analysis + `enrich` subcommand
 │       ├── install_skill.py   # `install-skill` subcommand
 │       └── skills/fertilizer/ # bundled Claude Code skill (SKILL.md + references/)
@@ -314,6 +352,7 @@ fertilizer/
 │   └── README.md             # walkthrough of `extract` + `enrich` on demo data
 └── tests/
     ├── test_extract.py
+    ├── test_counting.py
     ├── test_enrichment.py
     └── test_install_skill.py
 ```

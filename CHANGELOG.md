@@ -8,6 +8,16 @@ project adheres to semantic versioning (the API is unstable until 1.0).
 
 ### Added
 
+- `extract` counts reads from BAM/SAM files (`-a/--bams`) and fragment ends
+  from 10x fragment files (`-f/--fragments`), in addition to summarizing
+  bigWigs. BAMs count each read's 5' end, skipping unmapped, duplicate,
+  secondary, supplementary and QC-fail reads and MAPQ < 30 by default
+  (`--min-mapq`, `--include-flagged`); fragment files count both ends of each
+  fragment once. `-ps/--pos-shift` and `-ns/--neg-shift` shift read and
+  fragment coordinates exactly as bam2bw does (`-ps 4 -ns -5` for Tn5).
+  `-g/--groups` with `--barcode-column`/`--group-column` splits fragment files
+  into one column per barcode group (pseudobulk). The output header records
+  `stat=count`, which `enrich` accepts. `pysam` is now a dependency.
 - `fertilizer install-skill` copies a bundled Claude Code skill into
   `~/.claude/skills/fertilizer` (`-d` to change the directory, `--symlink`,
   `-f/--force`). The skill covers inputs, both subcommands, the method,

@@ -14,9 +14,10 @@ def build_parser() -> argparse.ArgumentParser:
 	parser = argparse.ArgumentParser(
 	    prog="fertilizer",
 	    description=(
-	        "Per-region enrichment from single-replicate bigWig signal "
-	        "across conditions. Pipeline: `extract` aggregates bigWig "
-	        "signal over BED regions; `enrich` runs a DESeq2-inspired "
+	        "Per-region enrichment from single-replicate signal across "
+	        "conditions. Pipeline: `extract` aggregates bigWig signal, or "
+	        "counts BAM reads or fragment ends, over BED regions; `enrich` "
+	        "runs a DESeq2-inspired "
 	        "NB-GLM LRT to call loci with significantly enriched signal "
 	        "in one condition vs the others."
 	    ),

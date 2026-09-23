@@ -1,4 +1,5 @@
-"""Signal aggregation over BED regions from bigWig tracks."""
+"""Signal aggregation over BED regions from bigWig tracks, and read or
+fragment counts from BAM/SAM and 10x fragment files."""
 
 from __future__ import annotations
 
@@ -13,6 +14,8 @@ import numpy as np
 import pandas as pd
 import pyBigWig
 from joblib import Parallel, delayed
+
+from . import counting
 
 
 def _open_text_write(path: str):
@@ -47,33 +50,38 @@ class FertilizerWarning(UserWarning):
 
 
 def _format_issue_warning(
-    key: str, bigwig_path: str, example_chrom: str, bigwig_chroms: list[str]
+    key: str, bigwig_path: str, example_chrom: str, bigwig_chroms: list[str],
+    kind: str = "bigWig",
 ) -> str:
-	"""Compose a biologist-friendly warning for a per-bigWig issue."""
+	"""Compose a biologist-friendly warning for a per-input-file issue.
+
+	`kind` names the input type in the message ("bigWig", "BAM" or
+	"fragment file").
+	"""
 	if key == "missing_chrom":
 		sample = ", ".join(sorted(bigwig_chroms)[:5])
 		ellipsis = ", ..." if len(bigwig_chroms) > 5 else ""
 		return (
 		    f"chromosome {example_chrom!r} (and possibly others) referenced "
-		    f"in BED but missing from bigWig {bigwig_path!r}; those values "
-		    f"were filled with 0.0. Bigwig has chroms: [{sample}{ellipsis}]. "
+		    f"in BED but missing from {kind} {bigwig_path!r}; those values "
+		    f"were filled with 0.0. The {kind} has chroms: [{sample}{ellipsis}]. "
 		    "Common cause: mixing 'chr1'-style and '1'-style names "
 		    "(hg19/hg38 vs Ensembl)."
 		)
 	if key == "out_of_bounds":
 		return (
-		    f"some regions extend beyond the chromosome length of bigWig "
+		    f"some regions extend beyond the chromosome length of {kind} "
 		    f"{bigwig_path!r} (first encountered on chrom {example_chrom!r}); "
 		    "those values were filled with 0.0. Common cause: mixing "
-		    "assemblies (e.g. hg19 BED against hg38 bigWig)."
+		    f"assemblies (e.g. hg19 BED against hg38 {kind})."
 		)
 	if key == "invalid_region":
 		return (
 		    f"some regions have non-positive length or a negative start "
 		    f"(first encountered on chrom {example_chrom!r}); those values "
-		    f"were filled with 0.0 (bigWig {bigwig_path!r})."
+		    f"were filled with 0.0 ({kind} {bigwig_path!r})."
 		)
-	return f"unknown locus-level issue {key!r} in bigWig {bigwig_path!r}"
+	return f"unknown locus-level issue {key!r} in {kind} {bigwig_path!r}"
 
 STAT_CHOICES = ("mean", "max", "min", "sum", "std", "coverage")
 
@@ -238,11 +246,15 @@ def _chunk_slices(n: int, n_chunks: int) -> list[slice]:
 
 
 _EXTRACT_EPILOG = """\
-Example:
+Examples:
   fertilizer extract -w A.bw B.bw C.bw -b peaks.bed -o signals.tsv -s sum
+  fertilizer extract -a A.bam B.bam C.bam -b peaks.bed -o counts.tsv -ps 4 -ns -5
+  fertilizer extract -f fragments.tsv.gz -g cells.tsv --group-column cluster \\
+      -b peaks.bed -o counts.tsv
 
-Use --stat sum if the output will be passed to `fertilizer enrich` — the
-NB-GLM there assumes count-like input. See the README for full docs:
+Use --stat sum with bigWigs if the output will be passed to `fertilizer
+enrich` — the NB-GLM there assumes count-like input. BAM and fragment input
+are always counted. See the README for full docs:
 https://github.com/jmschrei/fertilizer#fertilizer-extract--signal-aggregation
 """
 
@@ -251,13 +263,25 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPa
 	"""Register the `fertilizer extract` subcommand."""
 	parser = subparsers.add_parser(
 	    "extract",
-	    help="Extract a summary statistic from bigWigs over BED regions.",
+	    help="Summarize bigWigs, or count BAM reads or fragment ends, over BED regions.",
 	    epilog=_EXTRACT_EPILOG,
 	    formatter_class=argparse.RawDescriptionHelpFormatter,
 	)
-	parser.add_argument(
-	    "-w", "--bigwigs", nargs="+", required=True, metavar="BIGWIG",
+	inputs = parser.add_mutually_exclusive_group(required=True)
+	inputs.add_argument(
+	    "-w", "--bigwigs", nargs="+", metavar="BIGWIG",
 	    help="One or more input bigWig files.",
+	)
+	inputs.add_argument(
+	    "-a", "--bams", nargs="+", metavar="BAM",
+	    help="One or more BAM/SAM files. Counts the 5' end of each read; each "
+	         "mate of a pair counts separately.",
+	)
+	inputs.add_argument(
+	    "-f", "--fragments", nargs="+", metavar="FRAGMENTS",
+	    help="One or more 10x-style fragment files (chrom, start, end, "
+	         "barcode, count; plain or gzipped). Counts both ends of each "
+	         "fragment (its Tn5 insertions); each line counts once.",
 	)
 	parser.add_argument(
 	    "-b", "--beds", nargs="+", required=True, metavar="BED",
@@ -268,36 +292,229 @@ def add_subparser(subparsers: argparse._SubParsersAction) -> argparse.ArgumentPa
 	    help="Path to output TSV.",
 	)
 	parser.add_argument(
-	    "-s", "--stat", choices=STAT_CHOICES, default="mean",
-	    help="Per-region summary statistic (default: mean).",
+	    "-s", "--stat", choices=STAT_CHOICES, default=None,
+	    help="Per-region summary statistic for bigWig input (default: mean). "
+	         "BAM and fragment input are always counted.",
 	)
 	parser.add_argument(
 	    "-n", "--names", nargs="+", default=None, metavar="NAME",
-	    help="Override column names (one per --bigwigs entry). "
-	         "Defaults to each bigWig's filename stem.",
+	    help="Override column names (one per input file). Defaults to each "
+	         "file's name without its extension.",
 	)
 	parser.add_argument(
 	    "-j", "--n-jobs", type=int, default=-1,
 	    help="Number of parallel workers. -1 uses all cores (default).",
 	)
+	counts = parser.add_argument_group("BAM and fragment input")
+	counts.add_argument(
+	    "-ps", "--pos-shift", "--pos_shift", dest="pos_shift", type=int, default=None,
+	    help="Added to each read's or fragment's start coordinate before "
+	         "counting, as in bam2bw (default 0). `-ps 4 -ns -5` applies the "
+	         "standard Tn5 offset; 10x fragment files are already shifted.",
+	)
+	counts.add_argument(
+	    "-ns", "--neg-shift", "--neg_shift", dest="neg_shift", type=int, default=None,
+	    help="Added to each read's or fragment's end coordinate before "
+	         "counting, as in bam2bw (default 0).",
+	)
+	counts.add_argument(
+	    "--min-mapq", type=int, default=None,
+	    help="BAM only: skip reads with mapping quality below this (default 30).",
+	)
+	counts.add_argument(
+	    "--include-flagged", nargs="+", choices=sorted(counting.FLAG_BITS),
+	    default=None, metavar="FLAG",
+	    help="BAM only: count reads with these flags, which are skipped by "
+	         "default: duplicate, secondary, supplementary, qcfail. Unmapped "
+	         "reads are always skipped.",
+	)
+	counts.add_argument(
+	    "-g", "--groups", default=None, metavar="TSV",
+	    help="Fragment files only: a tab-separated table with a header row "
+	         "mapping cell barcodes to groups. Writes one column per group "
+	         "(pseudobulk), summed over all fragment files; barcodes not in "
+	         "the table are ignored.",
+	)
+	counts.add_argument(
+	    "--barcode-column", default=None, metavar="COL",
+	    help="Barcode column of the --groups table (default: barcode).",
+	)
+	counts.add_argument(
+	    "--group-column", default=None, metavar="COL",
+	    help="Group column of the --groups table (default: group).",
+	)
 	parser.set_defaults(func=run_extract)
 	return parser
+
+
+_KIND_LABELS = {"bigwigs": "bigWig", "bams": "BAM", "fragments": "fragment file"}
+
+
+def _validate_input_options(args: argparse.Namespace, kind: str) -> None:
+	"""Reject options that do not apply to the chosen input kind."""
+	count_only = {"--pos-shift": args.pos_shift, "--neg-shift": args.neg_shift}
+	bam_only = {"--min-mapq": args.min_mapq, "--include-flagged": args.include_flagged}
+	fragment_only = {
+	    "--groups": args.groups, "--barcode-column": args.barcode_column,
+	    "--group-column": args.group_column,
+	}
+	not_allowed = {
+	    "bigwigs": {**count_only, **bam_only, **fragment_only},
+	    "bams": fragment_only,
+	    "fragments": bam_only,
+	}[kind]
+	used = [flag for flag, value in not_allowed.items() if value is not None]
+	if used:
+		raise ValueError(f"{', '.join(used)} do(es) not apply to --{kind} input")
+	if kind != "bigwigs" and args.stat is not None:
+		raise ValueError(
+		    "--stat applies to bigWig input only; BAM and fragment input are "
+		    "always counted"
+		)
+	if args.groups is not None and args.names is not None:
+		raise ValueError("--names cannot be combined with --groups; columns are the group names")
+	if args.groups is None and (args.barcode_column or args.group_column):
+		raise ValueError("--barcode-column and --group-column require --groups")
+	if args.min_mapq is not None and args.min_mapq < 0:
+		raise ValueError(f"--min-mapq must be >= 0, got {args.min_mapq}")
+
+
+def _extract_bigwigs(
+    paths: list[str], chroms: np.ndarray, starts: np.ndarray, ends: np.ndarray,
+    stat: str, n_jobs: int,
+) -> tuple[np.ndarray, list[tuple[str, dict[str, str], list[str]]]]:
+	"""Per-region statistic for each bigWig, as an (n_regions, n_files) array,
+	plus (path, issues, chromosomes in file) for each file."""
+	n = len(chroms)
+	effective_n_jobs = joblib.cpu_count() if n_jobs == -1 else n_jobs
+	# Size chunks to fill the thread pool; joblib will schedule the
+	# (bigwig, slice) cross-product across workers.
+	slices = _chunk_slices(n, effective_n_jobs)
+
+	tasks = [(bw_idx, sl, bw_path)
+	         for bw_idx, bw_path in enumerate(paths)
+	         for sl in slices]
+	results = Parallel(n_jobs=n_jobs, prefer="threads")(
+	    delayed(_means_for_slice)(bw_path, chroms[sl], starts[sl], ends[sl], stat)
+	    for (_, sl, bw_path) in tasks
+	)
+
+	values = np.zeros((n, len(paths)), dtype=np.float64)
+	per_bw_issues: list[dict[str, str]] = [{} for _ in paths]
+	for (bw_idx, sl, _), (means, issues) in zip(tasks, results, strict=True):
+		values[sl, bw_idx] = means
+		# First-seen example chrom per issue per bigWig — preserved across
+		# chunks (don't clobber an earlier example with a later one).
+		for k, v in issues.items():
+			per_bw_issues[bw_idx].setdefault(k, v)
+
+	file_issues = []
+	for bw_path, issues in zip(paths, per_bw_issues, strict=True):
+		chroms_in_bw: list[str] = []
+		if issues:
+			try:
+				bw = _open_bw(bw_path)
+				chroms_in_bw = list(bw.chroms().keys())
+				bw.close()
+			except Exception:
+				chroms_in_bw = []
+		file_issues.append((bw_path, issues, chroms_in_bw))
+	return values, file_issues
+
+
+def _extract_counts(
+    kind: str, paths: list[str], chroms: np.ndarray, starts: np.ndarray,
+    ends: np.ndarray, args: argparse.Namespace,
+    groups: counting.BarcodeGroups | None,
+) -> tuple[np.ndarray, list[tuple[str, dict[str, str], list[str]]]]:
+	"""Counts per region for BAM or fragment input, as an (n_regions,
+	n_columns) array, plus (path, issues, chromosomes in file) per file.
+
+	Fragment files are streamed one task per file. An indexed BAM is split
+	into one task per chromosome; an unindexed BAM or a SAM is one task.
+	Tasks run in separate processes because pysam iteration holds the GIL.
+	"""
+	n = len(chroms)
+	pos_shift = args.pos_shift or 0
+	neg_shift = args.neg_shift or 0
+	effective_n_jobs = joblib.cpu_count() if args.n_jobs == -1 else args.n_jobs
+	file_issues = []
+
+	if kind == "fragments":
+		results = Parallel(n_jobs=max(1, min(effective_n_jobs, len(paths))))(
+		    delayed(counting.count_fragments)(
+		        path, chroms, starts, ends, pos_shift, neg_shift, groups,
+		    )
+		    for path in paths
+		)
+		per_file = []
+		for path, (file_counts, observed) in zip(paths, results, strict=True):
+			issues, bad = counting.count_issues(chroms, starts, ends, None, observed)
+			file_counts[bad] = 0
+			per_file.append(file_counts)
+			file_issues.append((path, issues, sorted(observed)))
+		values = sum(per_file) if groups is not None else np.hstack(per_file)
+		return values, file_issues
+
+	min_mapq = 30 if args.min_mapq is None else args.min_mapq
+	included = set(args.include_flagged or ())
+	skip_flags = sum(bit for name, bit in counting.FLAG_BITS.items() if name not in included)
+	lengths = [counting.bam_chrom_lengths(path) for path in paths]
+	region_chroms = set(chroms)
+	tasks = []
+	for i, path in enumerate(paths):
+		if counting.bam_has_index(path):
+			tasks += [(i, c) for c in sorted(region_chroms & set(lengths[i]))]
+		else:
+			tasks.append((i, None))
+	results = Parallel(n_jobs=max(1, min(effective_n_jobs, len(tasks))))(
+	    delayed(counting.count_bam)(
+	        paths[i], chroms, starts, ends, pos_shift, neg_shift, min_mapq,
+	        skip_flags, contig=contig,
+	    )
+	    for i, contig in tasks
+	)
+	values = np.zeros((n, len(paths)), dtype=np.int64)
+	for (i, _), task_counts in zip(tasks, results, strict=True):
+		values[:, i] += task_counts[:, 0]
+	for i, path in enumerate(paths):
+		issues, bad = counting.count_issues(chroms, starts, ends, lengths[i])
+		values[bad, i] = 0
+		file_issues.append((path, issues, list(lengths[i])))
+	return values, file_issues
 
 
 def run_extract(args: argparse.Namespace) -> int:
 	if args.n_jobs != -1 and args.n_jobs < 1:
 		raise ValueError(f"n_jobs must be -1 or >= 1, got {args.n_jobs}")
 
-	if args.names is not None:
-		if len(args.names) != len(args.bigwigs):
+	kind = next(k for k in ("bigwigs", "bams", "fragments") if getattr(args, k) is not None)
+	paths = list(getattr(args, kind))
+	label = _KIND_LABELS[kind]
+	_validate_input_options(args, kind)
+	stat = (args.stat or "mean") if kind == "bigwigs" else "count"
+
+	groups = None
+	if args.groups is not None:
+		groups = counting.BarcodeGroups.from_table(
+		    args.groups, args.barcode_column or "barcode", args.group_column or "group",
+		)
+		stems = list(groups.names)
+		source = f"--groups table {args.groups!r}"
+	elif args.names is not None:
+		if len(args.names) != len(paths):
 			raise ValueError(
-			    f"--names has {len(args.names)} entries but --bigwigs has "
-			    f"{len(args.bigwigs)}; they must match"
+			    f"--names has {len(args.names)} entries but --{kind} has "
+			    f"{len(paths)}; they must match"
 			)
 		stems = list(args.names)
+		source = "--names"
 	else:
-		stems = [Path(bw).stem for bw in args.bigwigs]
-	source = "--names" if args.names is not None else "bigWig filename stems"
+		if kind == "bigwigs":
+			stems = [Path(path).stem for path in paths]
+		else:
+			stems = [counting.input_stem(path) for path in paths]
+		source = f"{label} filename stems"
 	dupes = [stem for stem, count in Counter(stems).items() if count > 1]
 	if dupes:
 		raise ValueError(
@@ -317,50 +534,25 @@ def run_extract(args: argparse.Namespace) -> int:
 	starts = regions["start"].to_numpy(dtype=np.int64)
 	ends = regions["end"].to_numpy(dtype=np.int64)
 
-	# Sort by (chrom, start) so each worker reads its bigWig in index order.
+	# Sort by (chrom, start) so each worker reads its input in index order.
 	order = np.lexsort((starts, chroms))
 	inverse_order = np.empty(n, dtype=np.int64)
 	inverse_order[order] = np.arange(n)
 	chroms, starts, ends = chroms[order], starts[order], ends[order]
 
-	effective_n_jobs = joblib.cpu_count() if args.n_jobs == -1 else args.n_jobs
-	# Size chunks to fill the thread pool; joblib will schedule the
-	# (bigwig, slice) cross-product across workers.
-	slices = _chunk_slices(n, effective_n_jobs)
-
-	tasks = [(bw_idx, sl, bw_path)
-	         for bw_idx, bw_path in enumerate(args.bigwigs)
-	         for sl in slices]
-	results = Parallel(n_jobs=args.n_jobs, prefer="threads")(
-	    delayed(_means_for_slice)(bw_path, chroms[sl], starts[sl], ends[sl], args.stat)
-	    for (_, sl, bw_path) in tasks
-	)
-
-	per_bw_means = [np.zeros(n, dtype=np.float64) for _ in args.bigwigs]
-	per_bw_issues: list[dict[str, str]] = [{} for _ in args.bigwigs]
-	for (bw_idx, sl, _), (means, issues) in zip(tasks, results, strict=True):
-		per_bw_means[bw_idx][sl] = means
-		# First-seen example chrom per issue per bigWig — preserved across
-		# chunks (don't clobber an earlier example with a later one).
-		for k, v in issues.items():
-			per_bw_issues[bw_idx].setdefault(k, v)
+	if kind == "bigwigs":
+		values, file_issues = _extract_bigwigs(paths, chroms, starts, ends, stat, args.n_jobs)
+	else:
+		values, file_issues = _extract_counts(kind, paths, chroms, starts, ends, args, groups)
 
 	out = regions.copy()
-	for stem, sorted_means in zip(stems, per_bw_means, strict=True):
-		out[stem] = sorted_means[inverse_order]
+	for j, stem in enumerate(stems):
+		out[stem] = values[inverse_order, j]
 
-	for bw_path, issues in zip(args.bigwigs, per_bw_issues, strict=True):
-		if not issues:
-			continue
-		try:
-			bw = _open_bw(bw_path)
-			chroms_in_bw = list(bw.chroms().keys())
-			bw.close()
-		except Exception:
-			chroms_in_bw = []
+	for path, issues, chroms_in_file in file_issues:
 		for key in sorted(issues):
 			warnings.warn(
-			    _format_issue_warning(key, bw_path, issues[key], chroms_in_bw),
+			    _format_issue_warning(key, path, issues[key], chroms_in_file, kind=label),
 			    FertilizerWarning, stacklevel=2,
 			)
 
@@ -368,9 +560,10 @@ def run_extract(args: argparse.Namespace) -> int:
 		signal_block = out[stems].to_numpy()
 		zero_frac = float((signal_block == 0).mean())
 		if zero_frac > 0.95:
+			cells = "region-by-bigWig" if kind == "bigwigs" else "region-by-column"
 			warnings.warn(
-			    f"{zero_frac:.1%} of region-by-bigWig cells are exactly zero; "
-			    "this often means a wrong bigWig path, a chromosome-naming "
+			    f"{zero_frac:.1%} of {cells} cells are exactly zero; "
+			    f"this often means a wrong {label} path, a chromosome-naming "
 			    "mismatch (chr1 vs 1), or BED regions outside the assembly.",
 			    FertilizerWarning, stacklevel=2,
 			)
@@ -378,7 +571,15 @@ def run_extract(args: argparse.Namespace) -> int:
 	# Write a metadata header so `fertilizer enrich` can verify that the
 	# aggregation used here is compatible with the NB-GLM it applies.
 	# Output is gzipped transparently when args.output ends in .gz.
+	if kind == "bigwigs":
+		header = f"# fertilizer-extract stat={stat}\n"
+	else:
+		source_name = "bam" if kind == "bams" else "fragments"
+		header = (
+		    f"# fertilizer-extract stat=count source={source_name} "
+		    f"pos_shift={args.pos_shift or 0} neg_shift={args.neg_shift or 0}\n"
+		)
 	with _open_text_write(args.output) as fh:
-		fh.write(f"# fertilizer-extract stat={args.stat}\n")
+		fh.write(header)
 		out.to_csv(fh, sep="\t", index=False)
 	return 0
