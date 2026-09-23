@@ -45,6 +45,13 @@ project adheres to semantic versioning (the API is unstable until 1.0).
 
 ### Fixed
 
+- `extract` now computes every statistic from the full-resolution bigWig data
+  (`exact=True`). pyBigWig otherwise answers from a zoom level when the region
+  is wide enough, and its zoom-level `sum` is wrong by orders of magnitude, so
+  `extract -s sum` gave wrong values for regions of a few hundred bp or more on
+  any bigWig with zoom levels (pyBigWig writes them by default; check
+  `pyBigWig.open(path).header()["nLevels"]`). `mean`, `min`, `coverage` and
+  `std` were approximate. Re-run `extract` on output made with 0.1.0.
 - `cli.main` catches `ValueError` / `FileNotFoundError` and emits
   `fertilizer: error: <msg>` to stderr with exit code 2, instead of
   surfacing a Python traceback for user-input errors.

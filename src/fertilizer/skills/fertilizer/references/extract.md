@@ -16,7 +16,7 @@ Warnings go to stderr; keep them (`2> extract.log`) and read them before
 | `-w`, `--bigwigs` | required | one or more bigWigs |
 | `-b`, `--beds` | required | one or more BED files, concatenated in order |
 | `-o`, `--output` | required | output TSV; gzipped when the name ends `.gz` |
-| `-s`, `--stat` | **`mean`** | `mean`, `max`, `min`, `sum`, `std`, `coverage` (pyBigWig `stats(type=...)`). **Use `sum` for `enrich`** |
+| `-s`, `--stat` | **`mean`** | `mean`, `max`, `min`, `sum`, `std`, `coverage` (pyBigWig `stats(type=..., exact=True)`). **Use `sum` for `enrich`** |
 | `-n`, `--names` | filename stems | column names, one per `-w` entry, same order |
 | `-j`, `--n-jobs` | `-1` = every core | worker threads. Always set it; on a shared machine take at most half the free cores |
 
@@ -36,6 +36,10 @@ chr1	127	327	4000.0	5400.0	5200.0
   therefore `bed_col_6`. Give every BED the same number of columns, or the
   short ones get NaN in the extra columns.
 - Values are never NaN. Uncovered bases contribute 0.
+- fertilizer 0.1.0 read statistics from bigWig zoom levels, which made `-s sum`
+  wrong by orders of magnitude for regions of a few hundred bp or more whenever
+  the bigWig has zoom levels (`header()["nLevels"] > 0`). Re-run `extract` on
+  any `signals.tsv` made with 0.1.0.
 
 ## Column names
 
